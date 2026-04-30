@@ -32,6 +32,8 @@ const INITIAL_LOAD_COUNT = 20; // 首次加载数量
 const LOAD_MORE_COUNT = 20;    // 每次加载更多数量
 const UNIFIED_IMAGE_DURATION_MS = 1500;
 const UNIFIED_WHEEL_THROTTLE_MS = 1000;  // 1秒内只允许切换一个视频
+const PLAYER_VIDEO_MAX_AUTO_RETRIES = 1;
+const PLAYER_VIDEO_BUFFERING_DELAY_MS = 450;
 
 function getRecommendedFeedInlineStatusHtml(text, tone) {
     const iconHtml = tone === 'loading'
@@ -150,6 +152,243 @@ function disposeUnifiedVideoElement(videoEl) {
         videoEl.removeAttribute('src');
         videoEl.load();
     } catch (e) {}
+}
+
+function appendPlayerRetryParam(url, attempt) {
+    if (!url) return '';
+    if (url.indexOf('/api/media/proxy?') === -1) return url;
+    return url + (url.indexOf('?') === -1 ? '?' : '&') + 'player_retry=' + encodeURIComponent(String(attempt || Date.now()));
+}
+
+function getMediaErrorInfo(videoEl, fallbackTitle) {
+    if (!videoEl || !videoEl.getAttribute('src')) {
+        return {
+            title: '没有可用播放地址',
+            message: '当前作品没有返回可播放的视频地址，可以重试刷新详情或切换下一个作品。'
+        };
+    }
+
+    if (typeof navigator !== 'undefined' && navigator && navigator.onLine === false) {
+        return {
+            title: '网络已断开',
+            message: '恢复网络连接后点击重试。'
+        };
+    }
+
+    const error = videoEl.error;
+    const code = error ? error.code : 0;
+
+    if (code === 1) {
+        return {
+            title: '视频加载已中断',
+            message: '加载过程被系统或页面切换中断，请重试。'
+        };
+    }
+    if (code === 2) {
+        return {
+            title: '网络连接不稳定',
+            message: '视频数据请求中断，可能是当前网络较慢或平台响应超时。'
+        };
+    }
+    if (code === 3) {
+        return {
+            title: '视频解码失败',
+            message: '当前视频数据不完整，或编码格式暂时无法播放。'
+        };
+    }
+    if (code === 4) {
+        return {
+            title: '播放地址不可用',
+            message: '播放链接可能已过期、被平台拒绝，或当前格式不被系统播放器支持。'
+        };
+    }
+
+    return {
+        title: fallbackTitle || '视频暂时无法加载',
+        message: '可能是网络波动或平台返回异常，请稍后重试。'
+    };
+}
+
+function shouldAutoRetryVideo(videoEl) {
+    if (typeof navigator !== 'undefined' && navigator && navigator.onLine === false) return false;
+    const code = videoEl && videoEl.error ? videoEl.error.code : 0;
+    return code === 0 || code === 2 || code === 4;
+}
+
+function setSlidePlayerStatus(slide, options) {
+    if (!slide) return null;
+
+    const previous = slide.querySelector('.player-status-overlay');
+    if (previous) previous.remove();
+
+    const state = options && options.state ? options.state : 'loading';
+    const overlay = document.createElement('div');
+    overlay.className = 'player-loading player-status-overlay player-loading--' + state;
+
+    const iconWrap = document.createElement('div');
+    iconWrap.className = 'player-status-icon';
+    if (state === 'loading' || state === 'buffering') {
+        const spinner = document.createElement('span');
+        spinner.className = 'spinner-border';
+        spinner.setAttribute('aria-hidden', 'true');
+        iconWrap.appendChild(spinner);
+    } else {
+        const icon = document.createElement('i');
+        icon.className = state === 'error' ? 'bi bi-exclamation-circle' : 'bi bi-info-circle';
+        iconWrap.appendChild(icon);
+    }
+    overlay.appendChild(iconWrap);
+
+    const title = document.createElement('p');
+    title.className = 'player-status-title';
+    title.textContent = options && options.title ? options.title : '正在加载视频...';
+    overlay.appendChild(title);
+
+    if (options && options.message) {
+        const message = document.createElement('p');
+        message.className = 'player-status-message';
+        message.textContent = options.message;
+        overlay.appendChild(message);
+    }
+
+    if (options && typeof options.onRetry === 'function') {
+        const retryBtn = document.createElement('button');
+        retryBtn.type = 'button';
+        retryBtn.className = 'player-retry-btn';
+        retryBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i><span>重试</span>';
+        retryBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            options.onRetry();
+        });
+        overlay.appendChild(retryBtn);
+    }
+
+    slide.appendChild(overlay);
+    return overlay;
+}
+
+function clearSlidePlayerStatus(slide) {
+    if (!slide) return;
+    const overlay = slide.querySelector('.player-status-overlay');
+    if (overlay) overlay.remove();
+}
+
+function setupPlayerVideoLoadState(videoEl, slide, options) {
+    if (!videoEl || !slide) return;
+
+    const baseSrc = videoEl.getAttribute('src') || '';
+    videoEl.dataset.baseSrc = baseSrc;
+    videoEl.dataset.autoRetryCount = videoEl.dataset.autoRetryCount || '0';
+    let bufferingTimer = null;
+
+    const clearBufferingTimer = () => {
+        if (bufferingTimer) {
+            clearTimeout(bufferingTimer);
+            bufferingTimer = null;
+        }
+    };
+
+    const showLoading = (title, message) => {
+        setSlidePlayerStatus(slide, {
+            state: 'loading',
+            title: title || '正在加载视频...',
+            message: message || ''
+        });
+    };
+
+    const reloadVideoElement = (manual) => {
+        clearBufferingTimer();
+        const retryBaseSrc = videoEl.dataset.baseSrc || videoEl.getAttribute('src') || '';
+        if (!retryBaseSrc) {
+            const info = getMediaErrorInfo(videoEl, '没有可用播放地址');
+            setSlidePlayerStatus(slide, {
+                state: 'error',
+                title: info.title,
+                message: info.message,
+                onRetry: options && typeof options.onRetry === 'function' ? options.onRetry : null
+            });
+            return;
+        }
+
+        showLoading(manual ? '正在重新加载视频...' : '网络不稳定，正在自动重试...');
+        videoEl.dataset.disposed = 'false';
+        const retryAttempt = Date.now();
+        videoEl.src = appendPlayerRetryParam(retryBaseSrc, retryAttempt);
+        videoEl.load();
+        if (manual) {
+            videoEl.play().catch(() => {});
+        }
+    };
+
+    const handleFinalError = () => {
+        clearBufferingTimer();
+        if (options && typeof options.onFinalError === 'function') {
+            options.onFinalError(videoEl);
+        }
+        const info = getMediaErrorInfo(videoEl, options && options.errorTitle);
+        setSlidePlayerStatus(slide, {
+            state: 'error',
+            title: info.title,
+            message: info.message,
+            onRetry: function() {
+                videoEl.dataset.autoRetryCount = '0';
+                if (options && typeof options.onRetry === 'function') {
+                    options.onRetry();
+                } else {
+                    reloadVideoElement(true);
+                }
+            }
+        });
+    };
+
+    videoEl.addEventListener('loadstart', () => {
+        showLoading(options && options.loadingTitle ? options.loadingTitle : '正在加载视频...');
+    });
+    videoEl.addEventListener('waiting', () => {
+        clearBufferingTimer();
+        bufferingTimer = setTimeout(() => {
+            if (!slide.isConnected || videoEl.dataset.disposed === 'true') return;
+            setSlidePlayerStatus(slide, {
+                state: 'buffering',
+                title: '网络较慢，正在缓冲...',
+                message: '保持当前页面，播放器会继续尝试加载。'
+            });
+        }, PLAYER_VIDEO_BUFFERING_DELAY_MS);
+    });
+    videoEl.addEventListener('stalled', () => {
+        setSlidePlayerStatus(slide, {
+            state: 'buffering',
+            title: '连接不稳定，正在等待数据...',
+            message: '如果长时间无响应，可以点击重试。'
+        });
+    });
+    ['loadedmetadata', 'canplay', 'playing'].forEach(eventName => {
+        videoEl.addEventListener(eventName, () => {
+            clearBufferingTimer();
+            clearSlidePlayerStatus(slide);
+        });
+    });
+    videoEl.addEventListener('error', () => {
+        if (videoEl.dataset.disposed === 'true' || !slide.isConnected) {
+            return;
+        }
+
+        const retryCount = parseInt(videoEl.dataset.autoRetryCount || '0', 10);
+        if (retryCount < PLAYER_VIDEO_MAX_AUTO_RETRIES && shouldAutoRetryVideo(videoEl)) {
+            videoEl.dataset.autoRetryCount = String(retryCount + 1);
+            setTimeout(() => reloadVideoElement(false), 700);
+            return;
+        }
+
+        handleFinalError();
+    });
+
+    if (videoEl.readyState >= 1) {
+        clearSlidePlayerStatus(slide);
+    } else {
+        showLoading(options && options.loadingTitle ? options.loadingTitle : '正在加载视频...');
+    }
 }
 
 function captureRecommendedReturnState() {
@@ -1273,11 +1512,6 @@ function createVideoSlide(video, index) {
     }
 
     videoEl.onclick = () => toggleVideoPlay(videoEl);
-    videoEl.onerror = (e) => {
-        console.error('[createVideoSlide] 视频加载失败:', e);
-        console.error('[createVideoSlide] 视频src:', videoEl.src);
-    };
-
     videoEl.onloadedmetadata = () => {
         console.log(`[createVideoSlide] 视频 ${index} 元数据已加载, duration: ${videoEl.duration}`);
     };
@@ -1291,6 +1525,34 @@ function createVideoSlide(video, index) {
     };
 
     slide.appendChild(videoEl);
+    setupPlayerVideoLoadState(videoEl, slide, {
+        loadingTitle: '正在加载视频...',
+        errorTitle: '视频暂时无法播放',
+        onRetry: function() {
+            videoEl.dataset.autoRetryCount = '0';
+            if (!playAddr) {
+                setSlidePlayerStatus(slide, {
+                    state: 'error',
+                    title: '没有可用播放地址',
+                    message: '当前作品没有返回播放地址，请切换下一个作品或刷新推荐列表。'
+                });
+                return;
+            }
+            clearSlidePlayerStatus(slide);
+            videoEl.dataset.disposed = 'false';
+            videoEl.src = appendPlayerRetryParam(proxyUrl(playAddr, 'video'), Date.now());
+            videoEl.load();
+            setTimeout(() => playCurrentVideo(), 120);
+        }
+    });
+
+    if (!playAddr) {
+        setSlidePlayerStatus(slide, {
+            state: 'error',
+            title: '没有可用播放地址',
+            message: '当前作品没有返回播放地址，请切换下一个作品或刷新推荐列表。'
+        });
+    }
 
     console.log(`[createVideoSlide] 视频 ${index} 元素已添加到slide`);
     console.log(`[createVideoSlide] slide内容:`, slide.innerHTML.substring(0, 200));
@@ -2377,7 +2639,18 @@ function renderUnifiedCurrentVideo() {
 
     if (!firstMedia || !playAddr) {
         refreshCurrentUnifiedVideoFromDetail();
-        wrapper.innerHTML = '<div class="player-loading"><i class="bi bi-exclamation-circle"></i><p>视频不可用</p></div>';
+        const unavailableSlide = document.createElement('div');
+        unavailableSlide.className = 'video-slide active';
+        wrapper.appendChild(unavailableSlide);
+        setSlidePlayerStatus(unavailableSlide, {
+            state: 'error',
+            title: '没有可用播放地址',
+            message: '当前作品没有返回可播放的视频地址，正在尝试刷新详情。',
+            onRetry: function() {
+                unifiedPlayerState.currentVideo.__mediaRefreshAttempted = false;
+                renderUnifiedCurrentVideo();
+            }
+        });
         return;
     }
 
@@ -2420,15 +2693,17 @@ function renderUnifiedCurrentVideo() {
             slide.appendChild(playHint);
         });
     });
-
-    videoEl.addEventListener('error', (e) => {
-        if (videoEl.dataset.disposed === 'true' || !videoEl.getAttribute('src') || !slide.isConnected) {
-            return;
+    setupPlayerVideoLoadState(videoEl, slide, {
+        loadingTitle: '正在加载视频...',
+        errorTitle: '视频加载失败',
+        onFinalError: function(failedVideoEl) {
+            console.error('[renderUnifiedCurrentVideo] 视频加载失败:', failedVideoEl && failedVideoEl.error);
+            refreshCurrentUnifiedVideoFromDetail();
+        },
+        onRetry: function() {
+            unifiedPlayerState.currentVideo.__mediaRefreshAttempted = false;
+            renderUnifiedCurrentVideo();
         }
-        console.error('[renderUnifiedCurrentVideo] 视频加载失败:', e);
-        console.error('[renderUnifiedCurrentVideo] 错误详情:', videoEl.error);
-        refreshCurrentUnifiedVideoFromDetail();
-        slide.innerHTML = '<div class="player-loading"><i class="bi bi-exclamation-circle"></i><p>视频加载失败</p><p class="small text-muted">请检查网络连接或CORS设置</p></div>';
     });
 
     videoEl.addEventListener('ended', () => {
@@ -2788,13 +3063,16 @@ function renderCurrentMedia(media) {
                 slide.appendChild(playHint);
             });
         });
-
-        videoEl.addEventListener('error', (e) => {
-            if (videoEl.dataset.disposed === 'true' || !videoEl.getAttribute('src') || !slide.isConnected) {
-                return;
+        setupPlayerVideoLoadState(videoEl, slide, {
+            loadingTitle: '正在加载媒体...',
+            errorTitle: '媒体加载失败',
+            onFinalError: function(failedVideoEl) {
+                console.error('视频加载失败:', failedVideoEl && failedVideoEl.error);
+                refreshCurrentUnifiedVideoFromDetail();
+            },
+            onRetry: function() {
+                renderCurrentMedia(media);
             }
-            console.error('视频加载失败:', e);
-            refreshCurrentUnifiedVideoFromDetail();
         });
 
         videoEl.addEventListener('ended', () => {
