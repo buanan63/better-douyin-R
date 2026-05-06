@@ -19,7 +19,7 @@ env:
     - macOS Apple Silicon：下载 `Douyin.Downloader_*_aarch64.dmg` 或 `*_macos-arm64_portable.zip`
     - macOS Intel：下载 `Douyin.Downloader_*_x64.dmg` 或 `*_macos-x64_portable.zip`
     - Linux Debian/Ubuntu：下载 `Douyin.Downloader_*_amd64.deb`
-    - Linux Fedora/openSUSE/RHEL：下载 `Douyin.Downloader_*_x86_64.rpm`
+    - Linux Fedora/openSUSE/RHEL：下载 `Douyin.Downloader-*-1.x86_64.rpm`
     - Linux 通用便携：下载 `Douyin.Downloader_*_amd64.AppImage`
 
     `.sig` 和 `latest.json` / `windows.json` / `darwin.json` / `linux.json` 主要用于自动更新和签名校验，普通安装通常不需要手动下载。
@@ -291,7 +291,8 @@ jobs:
           WINDOWS_PORTABLE_SIG="$(read_sig "Douyin-Downloader_${APP_VERSION}_x64_portable.exe")"
           LINUX_APPIMAGE_SIG="$(read_sig "Douyin.Downloader_${APP_VERSION}_amd64.AppImage")"
           LINUX_DEB_SIG="$(read_sig "Douyin.Downloader_${APP_VERSION}_amd64.deb")"
-          LINUX_RPM_SIG="$(read_sig "Douyin.Downloader_${APP_VERSION}_x86_64.rpm")"
+          LINUX_RPM_ASSET="Douyin.Downloader-${APP_VERSION}-1.x86_64.rpm"
+          LINUX_RPM_SIG="$(read_sig "$LINUX_RPM_ASSET")"
 
           jq -n \
             --arg version "$APP_VERSION" \
@@ -310,7 +311,7 @@ jobs:
             --arg linux_deb_sig "$LINUX_DEB_SIG" \
             --arg linux_deb_url "$BASE_URL/Douyin.Downloader_${APP_VERSION}_amd64.deb" \
             --arg linux_rpm_sig "$LINUX_RPM_SIG" \
-            --arg linux_rpm_url "$BASE_URL/Douyin.Downloader_${APP_VERSION}_x86_64.rpm" \
+            --arg linux_rpm_url "$BASE_URL/$LINUX_RPM_ASSET" \
             '{
               version: $version,
               notes: $notes,
