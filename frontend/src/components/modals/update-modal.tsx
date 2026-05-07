@@ -17,7 +17,7 @@ interface UpdateModalProps {
 export function UpdateModal({
   open,
   onOpenChange,
-  currentVersion = "0.0.10",
+  currentVersion = "0.0.11",
   newVersion = "0.1.0",
   releaseNotes = "",
 }: UpdateModalProps) {
