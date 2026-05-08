@@ -1499,6 +1499,29 @@ struct DownloadFileEntry {
     size: u64,
     timestamp: i64,
     file_type: String,
+    media_type: String,
+}
+
+fn is_hidden_download_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| name.starts_with('.'))
+        .unwrap_or(false)
+}
+
+fn download_file_media_kind(path: &Path) -> Option<&'static str> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    match extension.as_str() {
+        "mp4" | "mov" | "m4v" | "webm" | "mkv" | "avi" | "flv" => Some("video"),
+        "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "heic" | "heif" => Some("image"),
+        "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" => Some("audio"),
+        _ => None,
+    }
 }
 
 fn scan_download_directory_entries(
@@ -1510,6 +1533,10 @@ fn scan_download_directory_entries(
     for entry in read_dir {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
+        if is_hidden_download_path(&path) {
+            continue;
+        }
+
         let metadata = entry.metadata().map_err(|e| e.to_string())?;
 
         if metadata.is_dir() {
@@ -1520,6 +1547,10 @@ fn scan_download_directory_entries(
         if !metadata.is_file() {
             continue;
         }
+
+        let Some(media_kind) = download_file_media_kind(&path) else {
+            continue;
+        };
 
         let filename = path
             .file_stem()
@@ -1552,7 +1583,8 @@ fn scan_download_directory_entries(
             desc: String::new(),
             size: metadata.len(),
             timestamp,
-            file_type,
+            file_type: file_type.clone(),
+            media_type: media_kind.to_string(),
         });
     }
 
@@ -1560,14 +1592,35 @@ fn scan_download_directory_entries(
 }
 
 #[tauri::command]
-async fn list_download_files(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+async fn list_download_files(
+    state: State<'_, AppState>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
     let target = configured_download_directory(&state).await?;
-    let mut items = Vec::new();
-    scan_download_directory_entries(&target, &mut items)?;
-    items.sort_by_key(|item| std::cmp::Reverse(item.timestamp));
+    let (items, total, total_size, latest) = tokio::task::spawn_blocking(move || {
+        let mut items = Vec::new();
+        scan_download_directory_entries(&target, &mut items)?;
+        items.sort_by_key(|item| std::cmp::Reverse(item.timestamp));
+        let total = items.len();
+        let total_size = items.iter().map(|item| item.size).sum::<u64>();
+        let latest = items.first().cloned();
+        let page_items = match (offset, limit) {
+            (Some(offset), Some(limit)) => items.into_iter().skip(offset).take(limit).collect(),
+            (Some(offset), None) => items.into_iter().skip(offset).collect(),
+            (None, Some(limit)) => items.into_iter().take(limit).collect(),
+            (None, None) => items,
+        };
+        Ok::<_, String>((page_items, total, total_size, latest))
+    })
+    .await
+    .map_err(|error| format!("扫描下载目录任务失败: {error}"))??;
     Ok(serde_json::json!({
         "success": true,
-        "items": items
+        "items": items,
+        "total": total,
+        "total_size": total_size,
+        "latest": latest
     }))
 }
 
@@ -2192,6 +2245,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::media_utils::{download_media_type_from_payload, parse_download_media_items};
+    use super::{download_file_media_kind, is_hidden_download_path};
+    use std::path::Path;
 
     #[test]
     fn parses_flat_download_media_items() {
@@ -2262,5 +2317,27 @@ mod tests {
             download_media_type_from_payload(&serde_json::json!({ "media_type": "mixed" })),
             "mixed"
         );
+    }
+
+    #[test]
+    fn classifies_download_media_files_and_filters_auxiliary_files() {
+        assert_eq!(
+            download_file_media_kind(Path::new("clip.mp4")),
+            Some("video")
+        );
+        assert_eq!(
+            download_file_media_kind(Path::new("image.WEBP")),
+            Some("image")
+        );
+        assert_eq!(
+            download_file_media_kind(Path::new("sound.m4a")),
+            Some("audio")
+        );
+        assert_eq!(download_file_media_kind(Path::new(".downloaded")), None);
+        assert_eq!(download_file_media_kind(Path::new("metadata.json")), None);
+
+        assert!(is_hidden_download_path(Path::new(".DS_Store")));
+        assert!(is_hidden_download_path(Path::new(".downloaded")));
+        assert!(!is_hidden_download_path(Path::new("作品.mp4")));
     }
 }
