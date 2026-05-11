@@ -21,7 +21,7 @@ import { downloadUserVideos, mediaProxyUrl, type UserInfo, type VideoInfo } from
 import { cn, formatNumber } from "@/lib/utils";
 
 type LikedTab = "videos" | "authors";
-const ORIGINAL_VIDEO_GRID_CLASS = "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3";
+const ORIGINAL_VIDEO_GRID_CLASS = "grid grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3";
 
 export function LikedView() {
   const [tab, setTab] = useState<LikedTab>("videos");
@@ -36,10 +36,38 @@ export function LikedView() {
   const { downloadVideo, downloadBatch } = useDownloads();
   const [detailVideo, setDetailVideo] = useState<VideoInfo | null>(null);
   const [playerIndex, setPlayerIndex] = useState<number | null>(null);
+  const setView = useAppStore((s) => s.setView);
+  const selectUser = useSearchStore((s) => s.selectUser);
+  const searchLoadVideos = useSearchStore((s) => s.loadVideos);
 
   const openPlayer = (video: VideoInfo) => {
     const index = videos.findIndex((item) => item.aweme_id === video.aweme_id);
     setPlayerIndex(index >= 0 ? index : 0);
+  };
+
+  const handleGoToAuthor = async (video: VideoInfo) => {
+    const author = video.author;
+    if (!author?.sec_uid) return;
+    const userInfo: UserInfo = {
+      uid: author.uid,
+      sec_uid: author.sec_uid,
+      nickname: author.nickname,
+      avatar_thumb: author.avatar_thumb,
+      avatar_medium: author.avatar_medium,
+      avatar_larger: author.avatar_medium || author.avatar_thumb,
+      signature: author.signature || "",
+      follower_count: author.follower_count || 0,
+      following_count: author.following_count || 0,
+      aweme_count: author.aweme_count || 0,
+      favoriting_count: author.favoriting_count || 0,
+      total_favorited: 0,
+      is_follow: author.is_follow || false,
+      unique_id: author.unique_id,
+      verify_status: author.verify_status || 0,
+    };
+    await selectUser(userInfo);
+    setView("search");
+    await searchLoadVideos();
   };
 
   useEffect(() => {
@@ -100,6 +128,7 @@ export function LikedView() {
             onSelect={openPlayer}
             onDetail={setDetailVideo}
             onDownload={(video) => void downloadVideo(video)}
+            onAuthor={handleGoToAuthor}
             onDownloadAll={() => void downloadBatch(videos)}
           />
         ) : (
@@ -144,6 +173,7 @@ function LikedVideosPanel({
   onSelect,
   onDetail,
   onDownload,
+  onAuthor,
   onDownloadAll,
 }: {
   videos: VideoInfo[];
@@ -153,6 +183,7 @@ function LikedVideosPanel({
   onSelect: (video: VideoInfo) => void;
   onDetail: (video: VideoInfo) => void;
   onDownload: (video: VideoInfo) => void;
+  onAuthor: (video: VideoInfo) => void;
   onDownloadAll: () => void;
 }) {
   return (
@@ -194,6 +225,7 @@ function LikedVideosPanel({
               onSelect={onSelect}
               onDetail={onDetail}
               onDownload={onDownload}
+              onAuthor={onAuthor}
             />
           ))}
         </motion.div>
