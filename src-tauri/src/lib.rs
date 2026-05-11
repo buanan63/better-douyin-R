@@ -295,8 +295,7 @@ async fn select_directory(app: tauri::AppHandle) -> Result<Option<String>, Strin
         let _ = tx.send(folder.map(|path| path.to_string()));
     });
 
-    rx.await
-        .map_err(|_| "选择目录对话框未返回结果".to_string())
+    rx.await.map_err(|_| "选择目录对话框未返回结果".to_string())
 }
 
 /// 验证 Cookie (简化版)

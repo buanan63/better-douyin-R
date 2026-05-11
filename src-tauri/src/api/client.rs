@@ -1094,7 +1094,12 @@ impl DouyinClient {
                             total_favorited: user["total_favorited"].as_i64().unwrap_or(0),
                             aweme_count: Self::json_count_value(
                                 user,
-                                &["aweme_count", "aweme_count_str", "aweme_count_text", "work_count"],
+                                &[
+                                    "aweme_count",
+                                    "aweme_count_str",
+                                    "aweme_count_text",
+                                    "work_count",
+                                ],
                             ),
                             favoriting_count: user["favoriting_count"].as_i64().unwrap_or(0),
                             is_follow: user["is_follow"].as_bool().unwrap_or(false),
