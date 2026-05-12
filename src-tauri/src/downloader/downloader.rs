@@ -910,7 +910,6 @@ impl Downloader {
             let total_discovered = total_discovered.clone();
             let batch_id = batch_task_id.clone();
             let estimated = estimated_total;
-            let batch_started_at = batch_started_at;
 
             tokio::spawn(async move {
                 // 并发控制
@@ -1518,7 +1517,6 @@ impl Downloader {
             let completed = completed_count.clone();
             let failed = failed_count.clone();
             let aweme_id = video.aweme_id.clone();
-            let batch_started_at = batch_started_at;
 
             // 收集媒体URL
             let media_urls = self.collect_download_media_items(&video);
@@ -2269,6 +2267,35 @@ mod tests {
         let video = video_with_quality_candidates();
         assert_eq!(
             select_video_url(&video, DownloadQuality::Smallest).as_deref(),
+            Some("lowbr")
+        );
+    }
+
+    #[test]
+    fn downloader_uses_updated_quality_config() {
+        let mut config = AppConfig {
+            download_quality: "auto".to_string(),
+            ..Default::default()
+        };
+        let mut downloader = Downloader::new(config.clone(), None).expect("downloader");
+        let video = video_with_quality_candidates();
+
+        assert_eq!(
+            downloader
+                .collect_download_media_items(&video)
+                .first()
+                .map(|item| item.url.as_str()),
+            Some("download-default")
+        );
+
+        config.download_quality = "smallest".to_string();
+        downloader.update_config(config);
+
+        assert_eq!(
+            downloader
+                .collect_download_media_items(&video)
+                .first()
+                .map(|item| item.url.as_str()),
             Some("lowbr")
         );
     }

@@ -36,11 +36,13 @@ import {
 interface FullscreenPlayerProps {
   videos: VideoInfo[];
   initialIndex?: number;
+  initialMediaIndex?: number;
   open: boolean;
   onClose: () => void;
   onDownload?: (video: VideoInfo) => void;
   onLoadMore?: () => void;
   onShowDetail?: (video: VideoInfo) => void;
+  onAuthor?: (video: VideoInfo) => void;
 }
 
 const IMAGE_DURATION_SECONDS = 1.5;
@@ -51,6 +53,9 @@ const PLAYER_VIDEO_LOAD_TIMEOUT_MS = 18_000;
 const MAX_PRELOADED_MEDIA_NODES = 24;
 const MEDIA_TRANSITION_DISTANCE = 34;
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
+const WHEEL_VIDEO_SWITCH_THRESHOLD = 80;
+const WHEEL_VIDEO_SWITCH_LOCK_MS = 520;
+const WHEEL_IDLE_RESET_MS = 160;
 
 const mediaMotionVariants: Variants = {
   enter: (direction = 0) => ({
@@ -79,11 +84,13 @@ function playerMediaProxyUrl(url: string | null | undefined, mediaType: "video" 
 export function FullscreenPlayer({
   videos,
   initialIndex = 0,
+  initialMediaIndex = 0,
   open,
   onClose,
   onDownload,
   onLoadMore,
   onShowDetail,
+  onAuthor,
 }: FullscreenPlayerProps) {
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
   const [mediaIndex, setMediaIndex] = useState(0);
@@ -108,12 +115,14 @@ export function FullscreenPlayer({
   const bgmSourceKeyRef = useRef("");
   const touchStart = useRef({ x: 0, y: 0 });
   const wheelLocked = useRef(false);
+  const wheelAccumulatedDeltaRef = useRef(0);
   const loadMoreRequestedForLength = useRef(0);
   const imageAdvanceQueued = useRef(false);
   const desiredPlayingRef = useRef(true);
   const mediaSwitchingRef = useRef(false);
   const bgmManuallyPausedRef = useRef(false);
   const mediaSwitchReleaseRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const wheelResetTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const loadStatusTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const loadTimeoutTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const bufferingTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
@@ -145,10 +154,12 @@ export function FullscreenPlayer({
     : "empty";
   const progressPct = duration > 0 ? Math.min(100, Math.max(0, (currentTime / duration) * 100)) : 0;
   const hasMultipleMedia = mediaItems.length > 1;
+  const initialVideoKey = videos[initialIndex]?.aweme_id || "";
   const authorAvatar =
     currentVideo?.author?.avatar_thumb || currentVideo?.author?.avatar_medium || "";
   const authorName =
     currentVideo?.author?.nickname || currentVideo?.author?.unique_id || "用户";
+  const canOpenAuthor = Boolean(onAuthor && currentVideo?.author?.sec_uid);
   const likeCount = (currentVideo?.statistics?.digg_count || 0) + (liked ? 1 : 0);
   const favoriteBaseCount =
     currentVideo?.statistics?.collect_count || currentVideo?.statistics?.digg_count || 0;
@@ -560,18 +571,23 @@ export function FullscreenPlayer({
     }, 0);
 
     const safeIndex = Math.min(Math.max(initialIndex, 0), Math.max(videos.length - 1, 0));
+    const initialMediaCount = collectVideoMedia(videos[safeIndex]).length;
+    const safeMediaIndex = Math.min(
+      Math.max(initialMediaIndex, 0),
+      Math.max(initialMediaCount - 1, 0)
+    );
     desiredPlayingRef.current = true;
     mediaSwitchingRef.current = false;
     setMediaTransitionDirection(0);
     setCurrentIndex(safeIndex);
-    setMediaIndex(0);
+    setMediaIndex(safeMediaIndex);
     setCurrentTime(0);
     setDuration(0);
     progressSampleRef.current = 0;
     setPlaying(false);
     setReloadKey((value) => value + 1);
     return () => window.clearTimeout(focusTimer);
-  }, [initialIndex, open, videos.length]);
+  }, [initialIndex, initialMediaIndex, initialVideoKey, open]);
 
   useEffect(() => {
     setLiked(false);
@@ -583,6 +599,9 @@ export function FullscreenPlayer({
     return () => {
       if (mediaSwitchReleaseRef.current) {
         window.clearTimeout(mediaSwitchReleaseRef.current);
+      }
+      if (wheelResetTimerRef.current) {
+        window.clearTimeout(wheelResetTimerRef.current);
       }
       clearLoadTimers();
       stopVideoProgressLoop();
@@ -842,13 +861,35 @@ export function FullscreenPlayer({
   const handleWheel = useCallback((event: ReactWheelEvent) => {
     event.preventDefault();
     if (wheelLocked.current) return;
+
+    const normalizedDeltaY = normalizeWheelDelta(event);
+    if (normalizedDeltaY === 0) return;
+
+    const previousDelta = wheelAccumulatedDeltaRef.current;
+    if (previousDelta !== 0 && Math.sign(previousDelta) !== Math.sign(normalizedDeltaY)) {
+      wheelAccumulatedDeltaRef.current = 0;
+    }
+    wheelAccumulatedDeltaRef.current += normalizedDeltaY;
+
+    if (wheelResetTimerRef.current) {
+      window.clearTimeout(wheelResetTimerRef.current);
+    }
+    wheelResetTimerRef.current = window.setTimeout(() => {
+      wheelAccumulatedDeltaRef.current = 0;
+      wheelResetTimerRef.current = null;
+    }, WHEEL_IDLE_RESET_MS);
+
+    if (Math.abs(wheelAccumulatedDeltaRef.current) < WHEEL_VIDEO_SWITCH_THRESHOLD) return;
+
+    const shouldPlayNext = wheelAccumulatedDeltaRef.current > 0;
+    wheelAccumulatedDeltaRef.current = 0;
     wheelLocked.current = true;
     window.setTimeout(() => {
       wheelLocked.current = false;
-    }, 420);
+    }, WHEEL_VIDEO_SWITCH_LOCK_MS);
 
-    if (event.deltaY > 20) playNextVideo();
-    if (event.deltaY < -20) playPrevVideo();
+    if (shouldPlayNext) playNextVideo();
+    else playPrevVideo();
   }, [playNextVideo, playPrevVideo]);
 
   const handleTouchStart = (event: ReactTouchEvent) => {
@@ -1035,7 +1076,23 @@ export function FullscreenPlayer({
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex min-w-0 items-center justify-between gap-3">
-              <div className="flex min-w-0 items-center gap-2">
+              <button
+                type="button"
+                className={cn(
+                  "flex min-w-0 items-center gap-2 rounded-full py-0.5 pr-2 transition-[background-color,opacity,transform]",
+                  canOpenAuthor
+                    ? "cursor-pointer hover:bg-white/10 active:scale-[0.98]"
+                    : "cursor-default opacity-75"
+                )}
+                disabled={!canOpenAuthor}
+                title={canOpenAuthor ? "进入作者主页" : "作者信息不可用"}
+                aria-label={canOpenAuthor ? `进入 ${authorName} 主页` : "作者信息不可用"}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (!currentVideo || !canOpenAuthor) return;
+                  onAuthor?.(currentVideo);
+                }}
+              >
                 <div className="h-7 w-7 shrink-0 overflow-hidden rounded-full border-2 border-white/30 bg-white/10">
                   {authorAvatar ? (
                     <img
@@ -1050,7 +1107,7 @@ export function FullscreenPlayer({
                   )}
                 </div>
                 <span className="truncate text-[0.88rem] font-semibold drop-shadow-md">@{authorName}</span>
-              </div>
+              </button>
 
               <div className="flex min-w-0 max-w-[66vw] items-center gap-1 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                 <InlinePlayerButton
@@ -1443,6 +1500,12 @@ function resolveMediaDirection(currentIndex: number, nextIndex: number, total: n
   const forwardDistance = (nextIndex - currentIndex + total) % total;
   const backwardDistance = (currentIndex - nextIndex + total) % total;
   return forwardDistance <= backwardDistance ? 1 : -1;
+}
+
+function normalizeWheelDelta(event: ReactWheelEvent): number {
+  if (event.deltaMode === 1) return event.deltaY * 16;
+  if (event.deltaMode === 2) return event.deltaY * window.innerHeight;
+  return event.deltaY;
 }
 
 function isKeyboardInputTarget(target: EventTarget | null): boolean {
