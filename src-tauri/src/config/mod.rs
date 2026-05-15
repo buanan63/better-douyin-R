@@ -60,7 +60,7 @@ impl Default for AppConfig {
             proxy: None,
             max_concurrent: 3,
             download_quality: default_download_quality(),
-            filename_template: "{author}_{title}_{date}".to_string(),
+            filename_template: "{title}_{aweme_id}".to_string(),
             auto_create_folder: true,
             folder_name_template: "{author}".to_string(),
             save_metadata: true,
@@ -148,6 +148,17 @@ impl AppConfig {
                 "download_quality must be one of: auto, highest, h264, smallest, got {}",
                 self.download_quality
             );
+        }
+
+        if self.filename_template.trim().is_empty() || self.filename_template.chars().count() > 160
+        {
+            anyhow::bail!("filename_template must be 1..=160 characters");
+        }
+
+        if self.folder_name_template.trim().is_empty()
+            || self.folder_name_template.chars().count() > 160
+        {
+            anyhow::bail!("folder_name_template must be 1..=160 characters");
         }
 
         Ok(())

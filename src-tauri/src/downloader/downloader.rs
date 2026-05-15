@@ -138,16 +138,16 @@ impl Downloader {
     pub async fn is_downloaded(&self, aweme_id: &str) -> bool {
         let history = self.history.lock().await;
         history.is_downloaded(aweme_id)
+            || load_all_downloaded_set(&PathBuf::from(&self.config.download_path))
+                .contains(aweme_id)
     }
 
     /// 添加视频下载任务
     pub async fn add_task(&self, video: &VideoInfo, save_path: Option<PathBuf>) -> Result<String> {
         let base_path = save_path.unwrap_or_else(|| PathBuf::from(&self.config.download_path));
-        let author_dir = base_path.join(sanitize_filename(&video.author.nickname));
 
         // 检查是否已下载（去重）
-        let downloaded = load_downloaded_set(&author_dir).await;
-        if downloaded.contains(&video.aweme_id) {
+        if self.is_downloaded(&video.aweme_id).await {
             return Err(anyhow!("视频已下载，跳过: {}", video.aweme_id));
         }
 
@@ -160,7 +160,7 @@ impl Downloader {
             video.video.cover.clone(),
             video.media_type.clone(),
             media_urls,
-            Some(author_dir),
+            Some(base_path),
         )
         .await
     }
@@ -184,8 +184,22 @@ impl Downloader {
 
         let task_id = uuid::Uuid::new_v4().to_string();
         let base_path = save_path.unwrap_or_else(|| PathBuf::from(&self.config.download_path));
-        let author_dir = base_path.join(self.sanitize_author_dir(&author));
-        let filename = self.generate_filename_base(&title, &aweme_id);
+        if self.is_downloaded(&aweme_id).await {
+            return Err(anyhow!("视频已下载，跳过: {}", aweme_id));
+        }
+        let author_dir = build_output_dir(
+            &self.config,
+            &base_path,
+            &author,
+            media_type_name(&media_type),
+        );
+        let filename = generate_filename_with_config(
+            &self.config,
+            &title,
+            &aweme_id,
+            &author,
+            media_type_name(&media_type),
+        );
 
         let task = DownloadTask {
             id: task_id.clone(),
@@ -223,30 +237,6 @@ impl Downloader {
             video,
             DownloadQuality::from_config(&self.config.download_quality),
         )
-    }
-
-    fn sanitize_author_dir(&self, author: &str) -> String {
-        let author = sanitize_filename(author);
-        if author.is_empty() {
-            "未知作者".to_string()
-        } else {
-            author
-        }
-    }
-
-    fn generate_filename_base(&self, title: &str, aweme_id: &str) -> String {
-        let title = sanitize_filename(title);
-        if title.chars().count() > 50 {
-            format!("{}...", truncate_chars(&title, 47))
-        } else if title.is_empty() {
-            if aweme_id.trim().is_empty() {
-                "未命名作品".to_string()
-            } else {
-                aweme_id.to_string()
-            }
-        } else {
-            title
-        }
     }
 
     fn collect_download_media_items(&self, video: &VideoInfo) -> Vec<DownloadMediaItem> {
@@ -973,10 +963,10 @@ impl Downloader {
 
                     // 检查是否已下载
                     {
-                        let base_path = PathBuf::from(&config.download_path);
-                        let author_dir = base_path.join(sanitize_filename(&video.author.nickname));
-                        let downloaded = load_downloaded_set(&author_dir).await;
-                        if downloaded.contains(&video.aweme_id) {
+                        let is_in_history = history.lock().await.is_downloaded(&video.aweme_id);
+                        let downloaded =
+                            load_all_downloaded_set(&PathBuf::from(&config.download_path));
+                        if is_in_history || downloaded.contains(&video.aweme_id) {
                             skipped.fetch_add(1, AtomicOrdering::SeqCst);
                             let current = completed.fetch_add(1, AtomicOrdering::SeqCst) + 1;
                             let total =
@@ -1182,8 +1172,19 @@ impl Downloader {
         }
 
         let base_path = PathBuf::from(&config.download_path);
-        let author_dir = base_path.join(sanitize_filename(&video.author.nickname));
-        let filename = generate_filename(&video.desc, &video.aweme_id);
+        let author_dir = build_output_dir(
+            &config,
+            &base_path,
+            &video.author.nickname,
+            media_type_name(&video.media_type),
+        );
+        let filename = generate_filename_with_config(
+            &config,
+            &video.desc,
+            &video.aweme_id,
+            &video.author.nickname,
+            media_type_name(&video.media_type),
+        );
         let display_name = truncate_chars(&video.desc, 20);
 
         tokio::fs::create_dir_all(&author_dir).await?;
@@ -1488,10 +1489,9 @@ impl Downloader {
             };
 
             // 检查是否已下载（去重）
-            let base_path = PathBuf::from(&self.config.download_path);
-            let author_dir = base_path.join(sanitize_filename(&video.author.nickname));
-            let downloaded = load_downloaded_set(&author_dir).await;
-            if downloaded.contains(&video.aweme_id) {
+            let is_in_history = self.history.lock().await.is_downloaded(&video.aweme_id);
+            let downloaded = load_all_downloaded_set(&PathBuf::from(&self.config.download_path));
+            if is_in_history || downloaded.contains(&video.aweme_id) {
                 skipped_count.fetch_add(1, AtomicOrdering::SeqCst);
                 let current = completed_count.fetch_add(1, AtomicOrdering::SeqCst) + 1;
 
@@ -1556,8 +1556,19 @@ impl Downloader {
             }
 
             let base_path = PathBuf::from(&self.config.download_path);
-            let author_dir = base_path.join(self.sanitize_author_dir(&video.author.nickname));
-            let filename = self.generate_filename_base(&video.desc, &video.aweme_id);
+            let author_dir = build_output_dir(
+                &self.config,
+                &base_path,
+                &video.author.nickname,
+                media_type_name(&video.media_type),
+            );
+            let filename = generate_filename_with_config(
+                &self.config,
+                &video.desc,
+                &video.aweme_id,
+                &video.author.nickname,
+                media_type_name(&video.media_type),
+            );
 
             let task = DownloadTask {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -2026,6 +2037,123 @@ fn parse_downloaded_set(content: &str) -> HashSet<String> {
     set
 }
 
+fn load_all_downloaded_set(root: &Path) -> HashSet<String> {
+    let mut result = HashSet::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) == Some(".downloaded") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    result.extend(parse_downloaded_set(&content));
+                }
+            }
+        }
+    }
+
+    result
+}
+
+fn template_value(
+    token: &str,
+    title: &str,
+    aweme_id: &str,
+    author: &str,
+    media_type: &str,
+) -> String {
+    match token {
+        "title" => title.to_string(),
+        "aweme_id" => aweme_id.to_string(),
+        "author" => author.to_string(),
+        "date" => Local::now().format("%Y%m%d").to_string(),
+        "time" => Local::now().format("%H%M%S").to_string(),
+        "media_type" => media_type.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn render_template(
+    template: &str,
+    title: &str,
+    aweme_id: &str,
+    author: &str,
+    media_type: &str,
+) -> String {
+    let mut output = String::new();
+    let mut chars = template.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '{' {
+            output.push(ch);
+            continue;
+        }
+
+        let mut token = String::new();
+        let mut closed = false;
+        while let Some(next) = chars.next() {
+            if next == '}' {
+                closed = true;
+                break;
+            }
+            token.push(next);
+        }
+
+        if closed {
+            output.push_str(&template_value(&token, title, aweme_id, author, media_type));
+        } else {
+            output.push('{');
+            output.push_str(&token);
+        }
+    }
+
+    output
+}
+
+fn truncate_filename_text(
+    value: &str,
+    default: &str,
+    max_chars: usize,
+    max_bytes: usize,
+    protected_suffix: &str,
+) -> String {
+    let mut text = value.trim_matches([' ', '.', '_']).to_string();
+    if text.is_empty() {
+        text = default.to_string();
+    }
+
+    if !protected_suffix.is_empty() && text.ends_with(protected_suffix) {
+        let prefix_len = text.len().saturating_sub(protected_suffix.len());
+        let mut prefix: String = text[..prefix_len]
+            .chars()
+            .take(max_chars.saturating_sub(protected_suffix.chars().count()))
+            .collect();
+        while !prefix.is_empty()
+            && format!("{}{}", prefix, protected_suffix).as_bytes().len() > max_bytes
+        {
+            prefix.pop();
+        }
+        text = format!("{}{}", prefix, protected_suffix);
+    } else {
+        text = text.chars().take(max_chars).collect();
+        while !text.is_empty() && text.as_bytes().len() > max_bytes {
+            text.pop();
+        }
+    }
+
+    let text = text.trim_matches([' ', '.', '_']).to_string();
+    if text.is_empty() {
+        default.to_string()
+    } else {
+        text
+    }
+}
+
 fn collect_video_candidates(video: &VideoInfo) -> Vec<VideoCandidate> {
     let mut candidates = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -2321,25 +2449,81 @@ fn sanitize_filename(name: &str) -> String {
     for c in invalid_chars {
         result = result.replace(c, "_");
     }
-    if result.chars().count() > 100 {
-        result = truncate_chars(&result, 100);
-    }
-    result.trim().to_string()
+    truncate_filename_text(&result, "未命名作品", 120, 200, "")
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-/// 生成文件名
-fn generate_filename(desc: &str, aweme_id: &str) -> String {
-    let title = sanitize_filename(desc);
-    if title.is_empty() {
-        aweme_id.to_string()
-    } else if title.chars().count() > 50 {
-        format!("{}...", truncate_chars(&title, 47))
+fn generate_filename_with_config(
+    config: &AppConfig,
+    desc: &str,
+    aweme_id: &str,
+    author: &str,
+    media_type: &str,
+) -> String {
+    let normalized_title = desc.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized_aweme_id = aweme_id.trim();
+    let default = if normalized_aweme_id.is_empty() {
+        "未命名作品".to_string()
     } else {
-        title
+        format!("未命名作品_{}", normalized_aweme_id)
+    };
+    let template = if config.filename_template.trim().is_empty() {
+        "{title}_{aweme_id}"
+    } else {
+        config.filename_template.trim()
+    };
+    let rendered = render_template(
+        template,
+        if normalized_title.is_empty() {
+            "未命名作品"
+        } else {
+            &normalized_title
+        },
+        normalized_aweme_id,
+        author.trim(),
+        media_type,
+    );
+    let sanitized = sanitize_filename(&rendered);
+    let protected_suffix = if normalized_aweme_id.is_empty() {
+        String::new()
+    } else if sanitized.ends_with(normalized_aweme_id) {
+        normalized_aweme_id.to_string()
+    } else {
+        format!("_{}", normalized_aweme_id)
+    };
+    let candidate = if !protected_suffix.is_empty() && !sanitized.ends_with(&protected_suffix) {
+        format!("{}{}", sanitized, protected_suffix)
+    } else {
+        sanitized
+    };
+
+    truncate_filename_text(&candidate, &default, 120, 180, &protected_suffix)
+}
+
+fn build_output_dir(
+    config: &AppConfig,
+    base_path: &Path,
+    author: &str,
+    media_type: &str,
+) -> PathBuf {
+    if !config.auto_create_folder {
+        return base_path.to_path_buf();
+    }
+
+    let template = if config.folder_name_template.trim().is_empty() {
+        "{author}"
+    } else {
+        config.folder_name_template.trim()
+    };
+    let rendered = render_template(template, "", "", author.trim(), media_type);
+    let folder = sanitize_filename(&rendered);
+    if folder.is_empty() {
+        base_path.join("未知作者")
+    } else {
+        base_path.join(folder)
     }
 }
 
@@ -2482,6 +2666,64 @@ mod tests {
         assert!(parsed.contains("1002"));
         assert!(parsed.contains("1003"));
         assert!(parsed.contains("1004"));
+    }
+
+    #[test]
+    fn filename_template_keeps_full_title_and_aweme_id() {
+        let config = AppConfig {
+            filename_template: "{title}".to_string(),
+            ..Default::default()
+        };
+        let aweme_id = "7380011223344556677";
+        let filename = generate_filename_with_config(
+            &config,
+            "这是 一个 完整 标题 第二段 文案",
+            aweme_id,
+            "作者",
+            "video",
+        );
+
+        assert_eq!(
+            filename,
+            format!("这是 一个 完整 标题 第二段 文案_{}", aweme_id)
+        );
+    }
+
+    #[test]
+    fn long_filename_template_preserves_aweme_id_suffix() {
+        let config = AppConfig {
+            filename_template: "{title}_{aweme_id}".to_string(),
+            ..Default::default()
+        };
+        let aweme_id = "7380011223344556677";
+        let filename = generate_filename_with_config(
+            &config,
+            &"很长标题".repeat(80),
+            aweme_id,
+            "作者",
+            "image",
+        );
+
+        assert!(filename.ends_with(aweme_id));
+        assert!(filename.as_bytes().len() <= 180);
+    }
+
+    #[test]
+    fn output_dir_respects_folder_template_toggle() {
+        let base = PathBuf::from("/tmp/douyin");
+        let mut config = AppConfig {
+            folder_name_template: "{author}_{media_type}".to_string(),
+            auto_create_folder: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            build_output_dir(&config, &base, "作者/名", "video"),
+            base.join("作者_名_video")
+        );
+
+        config.auto_create_folder = false;
+        assert_eq!(build_output_dir(&config, &base, "作者", "video"), base);
     }
 
     #[tokio::test]
