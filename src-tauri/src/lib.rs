@@ -322,37 +322,13 @@ async fn open_verify_browser(
         .filter(|value| !value.is_empty())
         .unwrap_or("https://www.douyin.com/");
     let target_url = Url::parse(requested_url).map_err(|error| format!("URL 无效: {}", error))?;
-    let cookie_literal =
-        serde_json::to_string(&cookie).map_err(|error| format!("Cookie 序列化失败: {}", error))?;
-    let cookie_script = format!(
-        r#"
-        (() => {{
-            const rawCookie = {cookie_literal};
-            if (!rawCookie) return;
-            try {{
-                if (window.sessionStorage) {{
-                    if (sessionStorage.getItem('__dy_verify_cookie_applied') === '1') return;
-                }}
-            }} catch (error) {{}}
-            rawCookie.split(';').map(item => item.trim()).filter(Boolean).forEach(item => {{
-                try {{
-                    document.cookie = `${{item}}; domain=.douyin.com; path=/`;
-                }} catch (error) {{}}
-            }});
-            try {{
-                if (window.sessionStorage) {{
-                    sessionStorage.setItem('__dy_verify_cookie_applied', '1');
-                    setTimeout(() => window.location.reload(), 120);
-                }}
-            }} catch (error) {{}}
-        }})();
-        "#
-    );
 
     if let Some(window) = app.get_webview_window("verify-browser") {
         let _ = window.set_focus();
         let _ = window.show();
-        let _ = window.eval(&cookie_script);
+        for cookie in parse_cookie_string(&cookie) {
+            let _ = window.set_cookie(cookie);
+        }
         let _ = window.navigate(target_url);
         return Ok(serde_json::json!({
             "success": true,
@@ -361,18 +337,22 @@ async fn open_verify_browser(
         }));
     }
 
-    tauri::WebviewWindowBuilder::new(
+    let window = tauri::WebviewWindowBuilder::new(
         &app,
         "verify-browser",
-        tauri::WebviewUrl::External(target_url),
+        tauri::WebviewUrl::External(target_url.clone()),
     )
     .title("抖音验证")
     .inner_size(1100.0, 750.0)
     .resizable(true)
     .focused(true)
-    .initialization_script(&cookie_script)
     .build()
     .map_err(|error| format!("无法打开验证窗口: {}", error))?;
+
+    for cookie in parse_cookie_string(&cookie) {
+        let _ = window.set_cookie(cookie);
+    }
+    let _ = window.navigate(target_url);
 
     Ok(serde_json::json!({
         "success": true,
