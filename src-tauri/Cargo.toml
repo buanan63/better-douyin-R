@@ -56,5 +56,8 @@ tower-http = { version = "0.6", features = ["fs"] }
 
 # UUID
 uuid = { version = "1", features = ["v4"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
 axum = "0.7"
 url = "2"

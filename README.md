@@ -193,6 +193,82 @@ npm run build
 
 ---
 
+## CLI 工具 `douyin-dl`
+
+除了桌面应用，项目也提供了一个独立的命令行工具，适合脚本调用、自动化处理和服务器环境。
+
+### 功能
+
+| 命令 | 说明 |
+|:---|:---|
+| `douyin-dl parse <URL>` | 解析抖音链接，输出视频元信息（JSON / 可读文本） |
+| `douyin-dl download <URL>` | 下载单个视频，实时显示进度 |
+| `douyin-dl config show` | 查看当前配置 |
+| `douyin-dl config set <key> <value>` | 修改配置（Cookie、下载目录等） |
+| `douyin-dl search <keyword>` | 搜索抖音用户 |
+| `douyin-dl user <sec_uid>` | 查看用户详情与近期作品 |
+| `douyin-dl feed` | 获取推荐视频流 |
+
+### 有 Rust 环境：从源码构建
+
+```bash
+cd src-tauri
+cargo build --release --bin douyin-dl
+```
+
+产物在 `src-tauri/target/release/douyin-dl`，可直接运行或放入 PATH：
+
+```bash
+ln -sf "$(pwd)/src-tauri/target/release/douyin-dl" /usr/local/bin/douyin-dl
+```
+
+### 没有 Rust 环境：下载预编译二进制
+
+从 [Releases](https://github.com/anYuJia/douyin-downloader-rust/releases) 页面下载对应平台的 `douyin-dl` 二进制（macOS / Linux / Windows），解压后即可使用。
+
+### 首次配置
+
+CLI 与桌面应用共享同一份配置文件（`~/.config/douyin-downloader/config.json`）：
+
+```bash
+# 设置 Cookie（从浏览器开发者工具复制）
+douyin-dl config set cookie "your-cookie-string"
+
+# 设置下载目录
+douyin-dl config set download_path "/home/user/Videos/Douyin"
+
+# 查看当前配置
+douyin-dl config show
+```
+
+### 使用示例
+
+```bash
+# 解析视频链接，获取基本信息
+douyin-dl parse "https://www.douyin.com/video/7341234567890123456"
+douyin-dl parse --format plain "https://v.douyin.com/xxxxx/"
+
+# 下载视频
+douyin-dl download "https://www.douyin.com/video/7341234567890123456"
+douyin-dl download -o ~/MyVideos "https://v.douyin.com/xxxxx/"
+
+# 搜索用户
+douyin-dl search "某个昵称"
+
+# 查看用户作品
+douyin-dl user "<sec_uid>" --limit 10
+
+# 管道输出（适合脚本）
+douyin-dl parse "..." | jq .aweme_id
+douyin-dl feed --count 5 | jq '.videos[] | {id: .aweme_id, desc: .desc}'
+```
+
+### Claude Code Skill
+
+项目附带了 Claude Code Skill（`skill/douyin-downloader/`），可在 Claude Code 中直接通过自然语言调用 CLI。
+
+---
+
 ## 技术栈
 
 - **桌面框架**：Tauri 2
