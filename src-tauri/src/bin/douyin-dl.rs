@@ -192,7 +192,10 @@ fn print_video_plain(video: &app_lib::api::VideoInfo) {
     let media_type = media_utils::python_media_type(video);
     println!("aweme_id:    {}", video.aweme_id);
     println!("标题:        {}", video.desc);
-    println!("作者:        {} (UID: {})", video.author.nickname, video.author.uid);
+    println!(
+        "作者:        {} (UID: {})",
+        video.author.nickname, video.author.uid
+    );
     println!("作者 sec_uid: {}", video.author.sec_uid);
     println!("发布时间:    {}", video.create_time);
     println!("媒体类型:    {}", media_type);
@@ -200,10 +203,7 @@ fn print_video_plain(video: &app_lib::api::VideoInfo) {
     println!("评论:        {}", video.statistics.comment_count);
     println!("分享:        {}", video.statistics.share_count);
     println!("播放:        {}", video.statistics.play_count);
-    println!(
-        "封面:        {}",
-        media_utils::python_cover_url(video)
-    );
+    println!("封面:        {}", media_utils::python_cover_url(video));
     if !video.video.play_addr.is_empty() {
         println!("播放地址:    {}", video.video.play_addr);
     }
@@ -235,17 +235,13 @@ async fn cmd_download(url: &str, output: Option<&str>) -> Result<()> {
     let client = make_client(&config)?;
     let video = resolve_video(&client, url).await?;
 
-    eprintln!(
-        "解析成功: {} — {}",
-        video.desc,
-        video.author.nickname
-    );
+    eprintln!("解析成功: {} — {}", video.desc, video.author.nickname);
 
     // Set up progress channel
     let (progress_tx, mut progress_rx) = mpsc::channel::<DownloaderEvent>(100);
 
-    let downloader = Downloader::new(config, Some(progress_tx))
-        .map_err(|e| anyhow!("创建下载器失败：{}", e))?;
+    let downloader =
+        Downloader::new(config, Some(progress_tx)).map_err(|e| anyhow!("创建下载器失败：{}", e))?;
 
     // Spawn progress listener
     let progress_handle = tokio::spawn(async move {
@@ -271,7 +267,10 @@ async fn cmd_download(url: &str, output: Option<&str>) -> Result<()> {
                         let desc = event.payload["desc"].as_str().unwrap_or("");
                         let completed = event.payload["completed"].as_u64().unwrap_or(0);
                         let total = event.payload["total"].as_u64().unwrap_or(0);
-                        eprintln!("[进度] {:3.0}% ({}/{}) {}", progress, completed, total, desc);
+                        eprintln!(
+                            "[进度] {:3.0}% ({}/{}) {}",
+                            progress, completed, total, desc
+                        );
                         last_progress = progress;
                     }
                 }
@@ -409,9 +408,7 @@ fn cmd_config(cmd: ConfigCommands) -> Result<()> {
                 }
             }
 
-            config
-                .save()
-                .map_err(|e| anyhow!("保存配置失败：{}", e))?;
+            config.save().map_err(|e| anyhow!("保存配置失败：{}", e))?;
             eprintln!("[配置] {} 已更新 → {}", key, config_file.display());
         }
     }
@@ -452,7 +449,10 @@ async fn cmd_search(keyword: &str, format: &str) -> Result<()> {
             if format == "plain" {
                 println!("未找到用户: {}", keyword);
             } else {
-                println!("{}", serde_json::json!({"success": false, "message": "未找到用户"}));
+                println!(
+                    "{}",
+                    serde_json::json!({"success": false, "message": "未找到用户"})
+                );
             }
         }
         SearchUserResult::Single(user) => {
@@ -530,7 +530,10 @@ async fn cmd_user(sec_uid: &str, limit: u32, format: &str) -> Result<()> {
         .map_err(|e| anyhow!("获取用户视频失败：{}", e))?;
 
     if format == "plain" {
-        println!("用户: {} (@{})", user_detail.info.nickname, user_detail.info.unique_id);
+        println!(
+            "用户: {} (@{})",
+            user_detail.info.nickname, user_detail.info.unique_id
+        );
         println!("UID: {}", user_detail.info.uid);
         println!("sec_uid: {}", user_detail.info.sec_uid);
         println!("粉丝: {}", user_detail.info.follower_count);
