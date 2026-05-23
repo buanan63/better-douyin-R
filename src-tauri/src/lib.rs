@@ -2410,6 +2410,74 @@ fn reveal_file_with_system(target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn write_text_to_command(mut command: std::process::Command, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = command
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| e.to_string())?;
+    }
+
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("系统剪贴板命令执行失败".to_string())
+    }
+}
+
+fn write_text_to_clipboard(text: &str) -> Result<(), String> {
+    use std::process::Command;
+
+    #[cfg(target_os = "macos")]
+    {
+        return write_text_to_command(Command::new("pbcopy"), text);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return write_text_to_command(Command::new("clip"), text);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let candidates: [(&str, &[&str]); 3] = [
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ];
+
+        for (program, args) in candidates {
+            let mut command = Command::new(program);
+            command.args(args);
+            if write_text_to_command(command, text).is_ok() {
+                return Ok(());
+            }
+        }
+
+        return Err("当前系统缺少可用的剪贴板工具".to_string());
+    }
+
+    #[allow(unreachable_code)]
+    Err("当前平台暂不支持系统剪贴板".to_string())
+}
+
+/// 写入系统剪贴板
+#[tauri::command]
+async fn copy_text_to_clipboard(text: String) -> Result<(), String> {
+    if text.is_empty() {
+        return Err("复制内容不能为空".to_string());
+    }
+    write_text_to_clipboard(&text)
+}
+
 /// 打开文件
 #[tauri::command]
 async fn open_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
@@ -2797,6 +2865,7 @@ pub fn run() {
             open_download_directory,
             open_file_location,
             delete_file,
+            copy_text_to_clipboard,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
