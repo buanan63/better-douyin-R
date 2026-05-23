@@ -2738,7 +2738,11 @@ async fn download_update(app_handle: tauri::AppHandle) -> Result<serde_json::Val
                     move || {
                         let _ = finished_app.emit(
                             "update-download-finished",
-                            serde_json::json!({ "success": true }),
+                            serde_json::json!({
+                                "success": true,
+                                "restart_required": true,
+                                "message": "更新安装完成，重启后使用新版本"
+                            }),
                         );
                     },
                 )
@@ -2746,7 +2750,8 @@ async fn download_update(app_handle: tauri::AppHandle) -> Result<serde_json::Val
             {
                 Ok(_) => Ok(serde_json::json!({
                     "success": true,
-                    "message": "更新下载并安装完成"
+                    "restart_required": true,
+                    "message": "更新安装完成，重启后使用新版本"
                 })),
                 Err(e) => {
                     log::error!("failed to download and install update: {}", e);
