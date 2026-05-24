@@ -1334,22 +1334,33 @@ impl DouyinClient {
 
     /// 获取无水印视频 URL
     pub fn get_no_watermark_url(video: &VideoInfo) -> Option<String> {
-        // 优先使用 download_addr
-        if let Some(download_addr) = &video.video.download_addr {
-            if !download_addr.is_empty() {
-                return Some(download_addr.clone());
+        for url in [
+            video.video.play_addr_h264.as_deref(),
+            Some(video.video.play_addr.as_str()),
+            video.video.download_addr.as_deref(),
+            video.video.play_addr_lowbr.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let original = url.trim().to_ascii_lowercase();
+            if original.contains("playwm")
+                || original.contains("watermark=1")
+                || original.contains("/aweme/v1/playwm")
+            {
+                continue;
             }
-        }
-
-        // 使用 play_addr 并替换水印参数
-        if !video.video.play_addr.is_empty() {
-            let clean_url = video
-                .video
-                .play_addr
+            let clean_url = url
+                .trim()
                 .replace("watermark=1", "watermark=0")
-                .replace("&watermark=", "")
                 .replace("playwm", "play");
-            return Some(clean_url);
+            let normalized = clean_url.to_ascii_lowercase();
+            if !clean_url.is_empty()
+                && !normalized.contains("playwm")
+                && !normalized.contains("watermark=1")
+            {
+                return Some(clean_url);
+            }
         }
         None
     }

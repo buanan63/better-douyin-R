@@ -65,6 +65,7 @@ struct VideoCandidate {
     is_h264: bool,
     is_download_addr: bool,
     is_lowbr: bool,
+    is_watermark: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -140,19 +141,16 @@ impl Downloader {
     /// 检查是否已下载（用于去重）
     pub async fn is_downloaded(&self, aweme_id: &str) -> bool {
         let history = self.history.lock().await;
-        history.is_downloaded(aweme_id)
-            || load_all_downloaded_set(&PathBuf::from(&self.config.download_path))
-                .contains(aweme_id)
+        is_downloaded_existing(
+            &history,
+            &PathBuf::from(&self.config.download_path),
+            aweme_id,
+        )
     }
 
     /// 添加视频下载任务
     pub async fn add_task(&self, video: &VideoInfo, save_path: Option<PathBuf>) -> Result<String> {
         let base_path = save_path.unwrap_or_else(|| PathBuf::from(&self.config.download_path));
-
-        // 检查是否已下载（去重）
-        if self.is_downloaded(&video.aweme_id).await {
-            return Err(anyhow!("视频已下载，跳过: {}", video.aweme_id));
-        }
 
         let media_urls = self.collect_download_media_items(video);
         self.add_media_task(
@@ -187,9 +185,6 @@ impl Downloader {
 
         let task_id = uuid::Uuid::new_v4().to_string();
         let base_path = save_path.unwrap_or_else(|| PathBuf::from(&self.config.download_path));
-        if self.is_downloaded(&aweme_id).await {
-            return Err(anyhow!("视频已下载，跳过: {}", aweme_id));
-        }
         let author_dir = build_output_dir(
             &self.config,
             &base_path,
@@ -966,10 +961,15 @@ impl Downloader {
 
                     // 检查是否已下载
                     {
-                        let is_in_history = history.lock().await.is_downloaded(&video.aweme_id);
-                        let downloaded =
-                            load_all_downloaded_set(&PathBuf::from(&config.download_path));
-                        if is_in_history || downloaded.contains(&video.aweme_id) {
+                        let should_skip = {
+                            let history_lock = history.lock().await;
+                            is_downloaded_existing(
+                                &history_lock,
+                                &PathBuf::from(&config.download_path),
+                                &video.aweme_id,
+                            )
+                        };
+                        if should_skip {
                             skipped.fetch_add(1, AtomicOrdering::SeqCst);
                             let current = completed.fetch_add(1, AtomicOrdering::SeqCst) + 1;
                             let total =
@@ -1492,9 +1492,15 @@ impl Downloader {
             };
 
             // 检查是否已下载（去重）
-            let is_in_history = self.history.lock().await.is_downloaded(&video.aweme_id);
-            let downloaded = load_all_downloaded_set(&PathBuf::from(&self.config.download_path));
-            if is_in_history || downloaded.contains(&video.aweme_id) {
+            let should_skip = {
+                let history_lock = self.history.lock().await;
+                is_downloaded_existing(
+                    &history_lock,
+                    &PathBuf::from(&self.config.download_path),
+                    &video.aweme_id,
+                )
+            };
+            if should_skip {
                 skipped_count.fetch_add(1, AtomicOrdering::SeqCst);
                 let current = completed_count.fetch_add(1, AtomicOrdering::SeqCst) + 1;
 
@@ -2063,6 +2069,56 @@ fn load_all_downloaded_set(root: &Path) -> HashSet<String> {
     result
 }
 
+fn is_downloaded_existing(history: &HistoryManager, root: &Path, aweme_id: &str) -> bool {
+    let aweme_id = aweme_id.trim();
+    if aweme_id.is_empty() {
+        return false;
+    }
+
+    if history
+        .get(aweme_id)
+        .map(|record| Path::new(&record.file_path).is_file())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    load_all_downloaded_set(root).contains(aweme_id) && file_exists_for_aweme(root, aweme_id)
+}
+
+fn file_exists_for_aweme(root: &Path, aweme_id: &str) -> bool {
+    if aweme_id.trim().is_empty() {
+        return false;
+    }
+
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if filename.starts_with('.') || filename == "download_record.json" {
+                continue;
+            }
+            if filename.contains(aweme_id) && path.is_file() {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 fn template_value(
     token: &str,
     title: &str,
@@ -2167,10 +2223,13 @@ fn collect_video_candidates(video: &VideoInfo) -> Vec<VideoCandidate> {
         let Some(url) = url else {
             return;
         };
+        let is_watermark = is_watermark_url(&url);
+        let url = clean_video_download_url(&url);
         if url.trim().is_empty() || !seen.insert(url.clone()) {
             return;
         }
         candidates.push(VideoCandidate {
+            is_watermark: is_watermark || is_watermark_url(&url),
             url,
             metric,
             is_h264,
@@ -2209,6 +2268,19 @@ fn collect_video_candidates(video: &VideoInfo) -> Vec<VideoCandidate> {
     push_candidate(Some(video.video.play_addr.clone()), 0, false, false, false);
 
     candidates
+}
+
+fn clean_video_download_url(url: &str) -> String {
+    url.trim()
+        .replace("watermark=1", "watermark=0")
+        .replace("playwm", "play")
+}
+
+fn is_watermark_url(url: &str) -> bool {
+    let normalized = url.trim().to_ascii_lowercase();
+    normalized.contains("playwm")
+        || normalized.contains("watermark=1")
+        || normalized.contains("/aweme/v1/playwm")
 }
 
 async fn emit_event(
@@ -2547,28 +2619,41 @@ fn select_video_url(video: &VideoInfo, quality: DownloadQuality) -> Option<Strin
     if candidates.is_empty() {
         return None;
     }
+    let clean_candidates = candidates
+        .iter()
+        .filter(|candidate| !candidate.is_watermark)
+        .collect::<Vec<_>>();
+    if clean_candidates.is_empty() {
+        return None;
+    }
 
     // 单次遍历收集所有候选特征
-    let download_addr = candidates.iter().find(|c| c.is_download_addr);
-    let h264_best = candidates
+    let download_addr = clean_candidates
         .iter()
+        .copied()
+        .find(|c| c.is_download_addr);
+    let h264_best = clean_candidates
+        .iter()
+        .copied()
         .filter(|c| c.is_h264 && !c.is_lowbr)
         .max_by_key(|c| c.metric);
-    let highest_metric = candidates
+    let highest_metric = clean_candidates
         .iter()
+        .copied()
         .filter(|c| c.metric > 0 && !c.is_download_addr && !c.is_lowbr)
         .max_by_key(|c| c.metric);
-    let lowbr = candidates.iter().find(|c| c.is_lowbr);
-    let smallest_metric = candidates
+    let lowbr = clean_candidates.iter().copied().find(|c| c.is_lowbr);
+    let smallest_metric = clean_candidates
         .iter()
+        .copied()
         .filter(|c| c.metric > 0)
         .min_by_key(|c| c.metric);
-    let first = candidates.first();
+    let first = clean_candidates.first().copied();
 
     let selected = match quality {
-        DownloadQuality::Auto => download_addr.or(h264_best).or(highest_metric).or(first),
-        DownloadQuality::Highest => highest_metric.or(download_addr).or(h264_best).or(first),
-        DownloadQuality::H264 => h264_best.or(download_addr).or(highest_metric).or(first),
+        DownloadQuality::Auto => h264_best.or(highest_metric).or(download_addr).or(first),
+        DownloadQuality::Highest => highest_metric.or(h264_best).or(download_addr).or(first),
+        DownloadQuality::H264 => h264_best.or(highest_metric).or(download_addr).or(first),
         DownloadQuality::Smallest => lowbr.or(smallest_metric).or(h264_best).or(first),
     };
 
@@ -2606,11 +2691,23 @@ mod tests {
     }
 
     #[test]
-    fn auto_keeps_download_addr_preference() {
+    fn auto_prefers_best_h264_candidate() {
         let video = video_with_quality_candidates();
         assert_eq!(
             select_video_url(&video, DownloadQuality::Auto).as_deref(),
-            Some("download-default")
+            Some("bitrate-high-h264")
+        );
+    }
+
+    #[test]
+    fn selection_skips_watermark_candidates() {
+        let mut video = VideoInfo::default();
+        video.video.play_addr = "https://example.com/aweme/v1/playwm/?watermark=1".to_string();
+        video.video.download_addr = Some("https://example.com/clean.mp4".to_string());
+
+        assert_eq!(
+            select_video_url(&video, DownloadQuality::Auto).as_deref(),
+            Some("https://example.com/clean.mp4")
         );
     }
 
@@ -2656,7 +2753,7 @@ mod tests {
                 .collect_download_media_items(&video)
                 .first()
                 .map(|item| item.url.as_str()),
-            Some("download-default")
+            Some("bitrate-high-h264")
         );
 
         config.download_quality = "smallest".to_string();

@@ -84,8 +84,10 @@ pub fn python_media_urls(video: &VideoInfo) -> Vec<serde_json::Value> {
         }
     }
 
-    if items.is_empty() && !video.video.play_addr.is_empty() {
-        items.push(serde_json::json!({ "type": MEDIA_TYPE_VIDEO, "url": video.video.play_addr }));
+    if items.is_empty() {
+        if let Some(url) = no_watermark_video_url(video) {
+            items.push(serde_json::json!({ "type": MEDIA_TYPE_VIDEO, "url": url }));
+        }
     }
 
     items
@@ -421,15 +423,18 @@ pub fn parse_download_media_items(
         for value in [
             payload
                 .get("video")
-                .and_then(|video| video.get("download_addr")),
+                .and_then(|video| video.get("play_addr_h264")),
             payload
                 .get("video")
                 .and_then(|video| video.get("play_addr")),
             payload
                 .get("video")
+                .and_then(|video| video.get("download_addr")),
+            payload
+                .get("video")
                 .and_then(|video| video.get("preview_addr")),
-            payload.get("download_addr"),
             payload.get("play_addr"),
+            payload.get("download_addr"),
             payload.get("video_url"),
             payload.get("url"),
         ]
@@ -504,7 +509,8 @@ fn push_download_item(
     url: &str,
     fallback_type: &str,
 ) {
-    let url = url.trim();
+    let original_url = url.trim();
+    let mut url = original_url.to_string();
     if url.is_empty() {
         return;
     }
@@ -514,11 +520,20 @@ fn push_download_item(
         MEDIA_TYPE_LIVE_PHOTO | "livephoto" => MEDIA_TYPE_LIVE_PHOTO.to_string(),
         MEDIA_TYPE_VIDEO => MEDIA_TYPE_VIDEO.to_string(),
         MEDIA_TYPE_AUDIO => MEDIA_TYPE_AUDIO.to_string(),
-        _ => infer_download_item_type(url, fallback_type),
+        _ => infer_download_item_type(&url, fallback_type),
     };
 
     if media_type == MEDIA_TYPE_AUDIO {
         return;
+    }
+    if media_type == MEDIA_TYPE_VIDEO {
+        if is_watermark_video_url(original_url) {
+            return;
+        }
+        url = clean_video_download_url(original_url);
+        if url.is_empty() || is_watermark_video_url(&url) {
+            return;
+        }
     }
     if items
         .iter()
@@ -529,8 +544,42 @@ fn push_download_item(
 
     items.push(DownloadMediaItem {
         r#type: media_type,
-        url: url.to_string(),
+        url,
     });
+}
+
+fn clean_video_download_url(url: &str) -> String {
+    url.trim()
+        .replace("watermark=1", "watermark=0")
+        .replace("playwm", "play")
+}
+
+fn is_watermark_video_url(url: &str) -> bool {
+    let normalized = url.trim().to_ascii_lowercase();
+    normalized.contains("playwm")
+        || normalized.contains("watermark=1")
+        || normalized.contains("/aweme/v1/playwm")
+}
+
+fn no_watermark_video_url(video: &VideoInfo) -> Option<String> {
+    for url in [
+        video.video.play_addr_h264.as_deref(),
+        Some(video.video.play_addr.as_str()),
+        video.video.download_addr.as_deref(),
+        video.video.play_addr_lowbr.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if is_watermark_video_url(url) {
+            continue;
+        }
+        let clean_url = clean_video_download_url(url);
+        if !clean_url.is_empty() && !is_watermark_video_url(&clean_url) {
+            return Some(clean_url);
+        }
+    }
+    None
 }
 
 pub fn download_media_items_from_video(video: &VideoInfo) -> Vec<DownloadMediaItem> {
@@ -560,15 +609,12 @@ pub fn download_media_items_from_video(video: &VideoInfo) -> Vec<DownloadMediaIt
     }
 
     if items.is_empty() {
-        if let Some(url) = DouyinClient::get_no_watermark_url(video) {
+        if let Some(url) =
+            no_watermark_video_url(video).or_else(|| DouyinClient::get_no_watermark_url(video))
+        {
             items.push(DownloadMediaItem {
                 r#type: MEDIA_TYPE_VIDEO.to_string(),
                 url,
-            });
-        } else if !video.video.play_addr.trim().is_empty() {
-            items.push(DownloadMediaItem {
-                r#type: MEDIA_TYPE_VIDEO.to_string(),
-                url: video.video.play_addr.clone(),
             });
         }
     }
@@ -684,6 +730,20 @@ mod tests {
             infer_download_item_type("https://example.com/image/v1", "video"),
             "image"
         );
+    }
+
+    #[test]
+    fn parse_download_items_skips_watermark_video_urls() {
+        let payload = serde_json::json!({
+            "media_urls": [
+                { "type": "video", "url": "https://example.com/aweme/v1/playwm/?watermark=1" },
+                { "type": "video", "url": "https://example.com/clean.mp4" }
+            ]
+        });
+
+        let parsed = parse_download_media_items(&payload, MEDIA_TYPE_VIDEO);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].url, "https://example.com/clean.mp4");
     }
 
     #[test]
