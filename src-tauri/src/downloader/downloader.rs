@@ -458,23 +458,21 @@ impl Downloader {
             )
             .await;
 
-            let response = runtime
-                .client
-                .get(&media.url)
-                .headers(headers.clone())
-                .send()
-                .await?;
-
-            if !response.status().is_success() {
-                return Err(anyhow!("HTTP error: {}", response.status()));
-            }
+            let (response, response_url) = request_media_with_fallback(
+                &runtime.client,
+                &runtime.config,
+                &task.aweme_id,
+                media,
+                &headers,
+            )
+            .await?;
 
             let response_size = response.content_length().unwrap_or(0);
             let content_type = response
                 .headers()
                 .get(CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok());
-            let extension = media_extension(media.r#type.as_str(), &media.url, content_type);
+            let extension = media_extension(media.r#type.as_str(), &response_url, content_type);
             let (file_path, mut file) = create_unique_output_file(
                 &save_dir,
                 &task.filename,
@@ -1245,22 +1243,16 @@ impl Downloader {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
 
-            let response = client
-                .get(&media.url)
-                .headers(headers.clone())
-                .send()
-                .await?;
-
-            if !response.status().is_success() {
-                return Err(anyhow!("HTTP error: {}", response.status()));
-            }
+            let (response, response_url) =
+                request_media_with_fallback(&client, &config, &video.aweme_id, media, &headers)
+                    .await?;
 
             let content_length = response.content_length().unwrap_or(0);
             let content_type = response
                 .headers()
                 .get(CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok());
-            let extension = media_extension(media.r#type.as_str(), &media.url, content_type);
+            let extension = media_extension(media.r#type.as_str(), &response_url, content_type);
             let (file_path, mut file) =
                 create_unique_output_file(&author_dir, &filename, index, total_files, &extension)
                     .await?;
@@ -1829,22 +1821,16 @@ impl Downloader {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
 
-            let response = client
-                .get(&media.url)
-                .headers(headers.clone())
-                .send()
-                .await?;
-
-            if !response.status().is_success() {
-                return Err(anyhow!("HTTP error: {}", response.status()));
-            }
+            let (response, response_url) =
+                request_media_with_fallback(&client, &config, &task.aweme_id, media, &headers)
+                    .await?;
 
             let response_size = response.content_length().unwrap_or(0);
             let content_type = response
                 .headers()
                 .get(CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok());
-            let extension = media_extension(media.r#type.as_str(), &media.url, content_type);
+            let extension = media_extension(media.r#type.as_str(), &response_url, content_type);
             let (file_path, mut file) = create_unique_output_file(
                 &save_dir,
                 &task.filename,
@@ -2223,13 +2209,12 @@ fn collect_video_candidates(video: &VideoInfo) -> Vec<VideoCandidate> {
         let Some(url) = url else {
             return;
         };
-        let is_watermark = is_watermark_url(&url);
         let url = clean_video_download_url(&url);
         if url.trim().is_empty() || !seen.insert(url.clone()) {
             return;
         }
         candidates.push(VideoCandidate {
-            is_watermark: is_watermark || is_watermark_url(&url),
+            is_watermark: is_watermark_url(&url),
             url,
             metric,
             is_h264,
@@ -2281,6 +2266,59 @@ fn is_watermark_url(url: &str) -> bool {
     normalized.contains("playwm")
         || normalized.contains("watermark=1")
         || normalized.contains("/aweme/v1/playwm")
+}
+
+async fn request_media_with_fallback(
+    client: &reqwest::Client,
+    config: &AppConfig,
+    aweme_id: &str,
+    media: &DownloadMediaItem,
+    headers: &HeaderMap,
+) -> Result<(reqwest::Response, String)> {
+    let response = client
+        .get(&media.url)
+        .headers(headers.clone())
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        return Ok((response, media.url.clone()));
+    }
+
+    let initial_status = response.status();
+    if media.r#type != "video" || aweme_id.trim().is_empty() {
+        return Err(anyhow!("HTTP error: {}", initial_status));
+    }
+
+    let fallback_urls = fresh_video_download_urls(config, aweme_id)
+        .await
+        .unwrap_or_default();
+    for url in fallback_urls {
+        if url == media.url {
+            continue;
+        }
+
+        let fallback_response = client.get(&url).headers(headers.clone()).send().await?;
+        if fallback_response.status().is_success() {
+            log::info!(
+                "download url refreshed after HTTP {}: aweme_id={}",
+                initial_status,
+                aweme_id
+            );
+            return Ok((fallback_response, url));
+        }
+    }
+
+    Err(anyhow!("HTTP error: {}", initial_status))
+}
+
+async fn fresh_video_download_urls(config: &AppConfig, aweme_id: &str) -> Result<Vec<String>> {
+    let client = DouyinClient::new(config.clone())?;
+    let video = client.get_video_detail(aweme_id).await?;
+    Ok(ordered_video_urls(
+        &video,
+        DownloadQuality::from_config(&config.download_quality),
+    ))
 }
 
 async fn emit_event(
@@ -2614,20 +2652,33 @@ fn build_output_dir(
 
 /// 选择视频下载URL
 fn select_video_url(video: &VideoInfo, quality: DownloadQuality) -> Option<String> {
+    ordered_video_urls(video, quality).into_iter().next()
+}
+
+fn ordered_video_urls(video: &VideoInfo, quality: DownloadQuality) -> Vec<String> {
     let candidates = collect_video_candidates(video);
 
     if candidates.is_empty() {
-        return None;
+        return Vec::new();
     }
     let clean_candidates = candidates
         .iter()
         .filter(|candidate| !candidate.is_watermark)
         .collect::<Vec<_>>();
     if clean_candidates.is_empty() {
-        return None;
+        return Vec::new();
     }
 
-    // 单次遍历收集所有候选特征
+    let mut ordered = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push = |candidate: Option<&VideoCandidate>| {
+        if let Some(candidate) = candidate {
+            if seen.insert(candidate.url.clone()) {
+                ordered.push(candidate.url.clone());
+            }
+        }
+    };
+
     let download_addr = clean_candidates
         .iter()
         .copied()
@@ -2650,14 +2701,43 @@ fn select_video_url(video: &VideoInfo, quality: DownloadQuality) -> Option<Strin
         .min_by_key(|c| c.metric);
     let first = clean_candidates.first().copied();
 
-    let selected = match quality {
-        DownloadQuality::Auto => h264_best.or(highest_metric).or(download_addr).or(first),
-        DownloadQuality::Highest => highest_metric.or(h264_best).or(download_addr).or(first),
-        DownloadQuality::H264 => h264_best.or(highest_metric).or(download_addr).or(first),
-        DownloadQuality::Smallest => lowbr.or(smallest_metric).or(h264_best).or(first),
-    };
+    match quality {
+        DownloadQuality::Auto => {
+            push(h264_best);
+            push(highest_metric);
+            push(download_addr);
+            push(first);
+        }
+        DownloadQuality::Highest => {
+            push(highest_metric);
+            push(h264_best);
+            push(download_addr);
+            push(first);
+        }
+        DownloadQuality::H264 => {
+            push(h264_best);
+            push(highest_metric);
+            push(download_addr);
+            push(first);
+        }
+        DownloadQuality::Smallest => {
+            push(lowbr);
+            push(smallest_metric);
+            push(h264_best);
+            push(first);
+        }
+    }
 
-    selected.map(|c| c.url.clone())
+    let mut rest = clean_candidates
+        .iter()
+        .copied()
+        .collect::<Vec<&VideoCandidate>>();
+    rest.sort_by_key(|candidate| std::cmp::Reverse(candidate.metric));
+    for candidate in rest {
+        push(Some(candidate));
+    }
+
+    ordered
 }
 
 #[cfg(test)]

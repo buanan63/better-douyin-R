@@ -527,9 +527,6 @@ fn push_download_item(
         return;
     }
     if media_type == MEDIA_TYPE_VIDEO {
-        if is_watermark_video_url(original_url) {
-            return;
-        }
         url = clean_video_download_url(original_url);
         if url.is_empty() || is_watermark_video_url(&url) {
             return;
@@ -571,9 +568,6 @@ fn no_watermark_video_url(video: &VideoInfo) -> Option<String> {
     .into_iter()
     .flatten()
     {
-        if is_watermark_video_url(url) {
-            continue;
-        }
         let clean_url = clean_video_download_url(url);
         if !clean_url.is_empty() && !is_watermark_video_url(&clean_url) {
             return Some(clean_url);
@@ -733,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_download_items_skips_watermark_video_urls() {
+    fn parse_download_items_cleans_watermark_video_urls() {
         let payload = serde_json::json!({
             "media_urls": [
                 { "type": "video", "url": "https://example.com/aweme/v1/playwm/?watermark=1" },
@@ -742,8 +736,12 @@ mod tests {
         });
 
         let parsed = parse_download_media_items(&payload, MEDIA_TYPE_VIDEO);
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].url, "https://example.com/clean.mp4");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            parsed[0].url,
+            "https://example.com/aweme/v1/play/?watermark=0"
+        );
+        assert_eq!(parsed[1].url, "https://example.com/clean.mp4");
     }
 
     #[test]

@@ -2512,7 +2512,9 @@ async fn open_file_location(state: State<'_, AppState>, path: String) -> Result<
 #[tauri::command]
 async fn delete_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
     let target = allowed_existing_file_path(&state, &path).await?;
-    std::fs::remove_file(target).map_err(|e| e.to_string())
+    std::fs::remove_file(target).map_err(|e| e.to_string())?;
+    *state.download_file_index.lock().await = None;
+    Ok(())
 }
 
 /// 获取应用版本号

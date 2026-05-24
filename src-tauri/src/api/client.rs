@@ -1343,13 +1343,6 @@ impl DouyinClient {
         .into_iter()
         .flatten()
         {
-            let original = url.trim().to_ascii_lowercase();
-            if original.contains("playwm")
-                || original.contains("watermark=1")
-                || original.contains("/aweme/v1/playwm")
-            {
-                continue;
-            }
             let clean_url = url
                 .trim()
                 .replace("watermark=1", "watermark=0")
