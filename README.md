@@ -1,97 +1,103 @@
 <div align="center">
 
-<img src="frontend/public/animated_icon.svg" width="128" height="128" alt="Douyin Downloader Logo">
+<img src="frontend/public/animated_icon.svg" width="120" height="120" style="margin-bottom: 10px;" alt="Douyin Downloader Logo">
 
-# Douyin Downloader
+# 💎 Douyin Downloader
 
-**抖音视频下载器 · Rust / Tauri 桌面重构版**
+### 跨平台桌面抖音下载终端（Rust / Tauri 2.0 重构版）
 
-[![Rust](https://img.shields.io/badge/Rust-1.77.2+-orange.svg?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Tauri](https://img.shields.io/badge/Tauri-2.0-blue.svg?style=flat-square&logo=tauri&logoColor=white)](https://tauri.app/)
-[![CI](https://img.shields.io/github/actions/workflow/status/anYuJia/douyin-downloader-rust/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/anYuJia/douyin-downloader-rust/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/anYuJia/douyin-downloader-rust?style=flat-square)](https://github.com/anYuJia/douyin-downloader-rust/releases)
-[![License](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square)](https://github.com/anYuJia/douyin-downloader-rust/releases/latest)
+[![Rust](https://img.shields.io/badge/Rust-1.77%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
+[![Tauri](https://img.shields.io/badge/Tauri-2.0-blue?style=flat-square&logo=tauri)](https://tauri.app/)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Win%20%7C%20Linux-lightgrey?style=flat-square)]()
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-基于 Rust + Tauri 2.0 的跨平台桌面版抖音下载工具，支持用户检索、链接解析、推荐视频浏览、收藏/点赞列表、分质量下载、多媒体作品下载与本地文件管理。
+[立即下载](#下载安装) • [界面预览](#界面预览) • [功能特性](#-功能特性与技术亮点) • [快速开始](#快速开始)
 
-<p>
-  <a href="https://github.com/anYuJia/douyin-downloader-rust/releases/latest"><strong>下载最新版</strong></a>
-  ·
-  <a href="#界面预览"><strong>界面预览</strong></a>
-  ·
-  <a href="#快速开始"><strong>快速开始</strong></a>
-  ·
-  <a href="#从源码构建"><strong>源码构建</strong></a>
-  ·
-  <a href="#常见问题"><strong>常见问题</strong></a>
-</p>
+---
+
+> **🌟 如果觉得本项目对您有帮助，请右上角点个 Star 支持作者持续维护！**
 
 </div>
 
 ---
 
-## 项目简介
+## ⚡ 功能特性与技术亮点
 
-Douyin Downloader 是 [DY_video_downloader](https://github.com/anYuJia/DY_video_downloader) 的 Rust / Tauri 重构版本，目标是把原先偏脚本化的下载流程整理成更轻量、稳定、易分发的桌面应用。
-
-相比 Python 打包版，当前版本更适合作为长期维护的桌面工具：
-
-- **更轻量**：原生桌面应用，无需 Python 运行时
-- **更易分发**：支持 Windows / macOS / Linux 安装包与便携包
-- **更集中**：搜索、解析、推荐、收藏、点赞、批量下载和本地管理集中在一个界面
-- **更清晰**：登录态、下载任务、文件位置和错误状态都有可见反馈
+* 🚀 **极速去重**：搭载单次磁盘扫描与内存交集去重算法，查重速度由分钟级**暴降至毫秒级**，完全零二次物理磁盘 I/O 开销。
+* 📡 **防重绘事件节流**：对批量跳过的进度推送实施高频节流保护，避免前端重绘风暴，海量下载绝不卡死。
+* 🎨 **双模自适应桥接**：自适应无缝切换 Tauri 原生 IPC 与标准 HTTP Fetch 接口，降低多版本维护成本。
+* 🔒 **本地播放与安全代理**：内置 Byte-Range 本地媒体播放代理，支持视频/图集/Live Photo 的流畅 Seek 拖动播放。
 
 ---
 
-## 功能亮点
+## 🌟 功能矩阵
 
-| 能力 | 说明 |
-|:---|:---|
-| 用户检索 | 搜索用户独立成页，支持历史记录、分页、补全、清除记录与用户主页跳转 |
-| 链接解析 | 解析入口独立成页，支持历史补全、键盘选择、单条作品详情与下载 |
-| 批量下载 | 支持下载用户作品、收藏作品、点赞作品、作者列表作品 |
-| 推荐视频 | 支持推荐 feed 浏览、去重加载与沉浸式播放器预览 |
-| 收藏/点赞 | 支持浏览收藏视频、自己的点赞视频与点赞作者 |
-| 多媒体作品 | 支持视频、图集、Live Photo、混合媒体 |
-| 下载质量 | 支持最高质量、兼容优先、最小体积等策略，并在单条与批量任务中生效 |
-| 实时进度 | 下载任务状态、当前进度、日志实时更新 |
-| 浏览器登录 | 内置登录窗口，用于获取可用 Cookie |
-| 本地管理 | 支持文件模式/作品模式、全量搜索、播放器打开、定位文件夹和删除本地文件 |
-| 播放器 | 支持点击作者进入主页、滚轮切换上下视频和作品内媒体切换 |
-| 自动更新 | 基于 GitHub Release updater metadata 检查新版本 |
+<div align="center">
+
+| 🏷️ 模块领域 | 🛠️ 核心功能 | 🎯 工业级技术指标 |
+| :--- | :--- | :--- |
+| **智能检索** | 用户页与主页分立，支持分页、输入补全、清除检索历史。 | 上下文环境全局保留，平滑切换 |
+| **单条解析** | 解析页提供历史记录补全，支持键盘上下选择及单条下载。 | 支持多媒体、Live Photo 与图集自动解析 |
+| **批量下载** | 获取作者全部作品、点赞、收藏，多线程并发调度下载。 | 并发度、存放路径、文件命名规则动态可调 |
+| **沉浸播放** | 推荐 Feed 流去重加载，支持滚轮沉浸切换、作者页一键跳转。 | 弱网智能重试提示，拒绝黑屏卡死 |
+| **本地管理** | 支持“文件模式/作品模式”双向切换，全量搜索及物理定位。 | 支持在应用内直连本地安全播放代理预览 |
+| **登录态保障** | 内置安全的 Chromium/Webkit 登录窗口，动态补全 Cookie。 | 本地解密读取，隐私全在本地 |
+
+</div>
+
+---
 
 ---
 
 ## 界面预览
 
-### 首页
+### 首页 / 主界面
 
 进入搜索用户、解析链接、推荐视频、收藏视频和本地下载管理入口。
 
 <p align="center">
-  <a href="docs/home.png">
-    <img src="docs/home.png" width="100%" alt="Douyin Downloader 首页">
+  <a href="docs/home.jpg">
+    <img src="docs/home.jpg" width="100%" alt="Douyin Downloader 首页">
   </a>
 </p>
 
-### 用户详情
+### 搜索用户
 
-查看用户资料、作品列表，并执行批量下载或单个作品下载。搜索用户页和用户主页已经拆分，从搜索、播放器作者名或其他入口进入时都会打开统一的用户主页。
+支持历史记录、分页、输入补全、清除记录，并可一键跳转用户主页。
 
 <p align="center">
-  <a href="docs/user_detail.png">
-    <img src="docs/user_detail.png" width="100%" alt="Douyin Downloader 用户详情">
+  <a href="docs/get_user.jpg">
+    <img src="docs/get_user.jpg" width="100%" alt="Douyin Downloader 搜索用户">
   </a>
 </p>
 
-### 播放器
+### 用户详情与批量下载
 
-推荐视频、作品详情和本地下载内容使用沉浸式预览。播放器支持滚轮切换上下视频、点击作者进入主页，弱网场景会显示更明确的加载、重试和错误提示。
+查看用户资料、作品列表，并执行批量下载或单个作品下载。从搜索、播放器作者名或其他入口进入时都会打开统一的用户主页。
 
 <p align="center">
-  <a href="docs/playvideo.png">
-    <img src="docs/playvideo.png" width="100%" alt="Douyin Downloader 播放器">
+  <a href="docs/user_detail.jpg">
+    <img src="docs/user_detail.jpg" width="100%" alt="Douyin Downloader 用户详情">
+  </a>
+</p>
+
+### 推荐视频流
+
+支持推荐视频的沉浸式刷视频流与一键下载，实现去重加载。
+
+<p align="center">
+  <a href="docs/recommend.jpg">
+    <img src="docs/recommend.jpg" width="100%" alt="Douyin Downloader 推荐视频">
+  </a>
+</p>
+
+### 沉浸式播放器
+
+推荐视频、作品详情和本地下载内容使用沉浸式预览。播放器支持滚轮切换上下视频、点击作者进入主页，弱网场景会显示更明确的加载、重试 and 错误提示。
+
+<p align="center">
+  <a href="docs/playvideo.jpg">
+    <img src="docs/playvideo.jpg" width="100%" alt="Douyin Downloader 播放器">
   </a>
 </p>
 

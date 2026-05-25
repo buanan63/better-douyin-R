@@ -31,6 +31,19 @@ struct LocalMediaQuery {
     path: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SeekDebugQuery {
+    phase: Option<String>,
+    target: Option<f64>,
+    before: Option<f64>,
+    after: Option<f64>,
+    duration: Option<f64>,
+    ready_state: Option<u32>,
+    network_state: Option<u32>,
+    paused: Option<bool>,
+    src: Option<String>,
+}
+
 fn host_matches(host: &str, allowed_domain: &str) -> bool {
     host == allowed_domain || host.ends_with(&format!(".{}", allowed_domain))
 }
@@ -622,6 +635,29 @@ async fn media_proxy(
     };
 
     let status = upstream_response.status();
+    let upstream_content_range = upstream_response
+        .headers()
+        .get("content-range")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let upstream_content_length = upstream_response
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    log::info!(
+        "media proxy upstream response: status={} seeded_range={} request_range=\"{}\" upstream_range=\"{}\" length=\"{}\" elapsed_ms={} url={}",
+        status,
+        should_seed_video_range,
+        request_range_str,
+        upstream_content_range,
+        upstream_content_length,
+        start.elapsed().as_millis(),
+        upstream_url.chars().take(120).collect::<String>()
+    );
+
     let mut response_builder = Response::builder().status(status);
     let response_headers = match response_builder.headers_mut() {
         Some(h) => h,
@@ -646,7 +682,6 @@ async fn media_proxy(
         .unwrap_or_default()
         .to_string();
 
-    // 始终透传 Content-Length 头部，避免对大于 2MB 的媒体文件强制分块传输（Chunked Transfer Encoding）而导致浏览器播放器无法拖动进度条寻址。
     if let Some(content_length) = upstream_response.headers().get("content-length") {
         response_headers.insert(header::CONTENT_LENGTH, content_length.clone());
     }
@@ -700,6 +735,22 @@ async fn media_proxy_options(request_headers: HeaderMap) -> Response<Body> {
     response
 }
 
+async fn seek_debug(Query(query): Query<SeekDebugQuery>) -> &'static str {
+    log::info!(
+        "player seek debug: phase={} target={:?} before={:?} after={:?} duration={:?} ready_state={:?} network_state={:?} paused={:?} src={}",
+        query.phase.unwrap_or_default(),
+        query.target,
+        query.before,
+        query.after,
+        query.duration,
+        query.ready_state,
+        query.network_state,
+        query.paused,
+        query.src.unwrap_or_default().chars().take(160).collect::<String>()
+    );
+    "ok"
+}
+
 pub async fn spawn_media_proxy(state: AppState) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], MEDIA_PROXY_PORT));
     let listener = TcpListener::bind(addr).await?;
@@ -718,6 +769,7 @@ pub async fn spawn_media_proxy(state: AppState) -> anyhow::Result<()> {
                 get(media_proxy).options(media_proxy_options),
             )
             .route("/api/local-media", get(local_media))
+            .route("/api/debug/seek", get(seek_debug))
             .fallback_service(ServeDir::new(dist_dir).append_index_html_on_directories(true))
             .with_state(state);
 
