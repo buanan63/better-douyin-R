@@ -14,6 +14,11 @@ use tokio::sync::Mutex;
 
 use super::types::*;
 
+fn looks_watermarked_media_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("watermark=1") || lower.contains("playwm") || lower.contains("logo_name=")
+}
+
 /// 抖音 API 客户端
 #[derive(Clone)]
 pub struct DouyinClient {
@@ -520,12 +525,43 @@ impl DouyinClient {
         // 视频数据 - 参考 Python 版本从 bit_rate[0]["play_addr"] 获取视频 URL
         let video_data = &data["video"];
 
-        // 直接使用首选的动态重定向播放地址（支持 Cookie 验证与 Range 播放器寻址）
-        let play_addr = self.get_first_url(&video_data["play_addr"]["url_list"]);
+        let dash_addr = Self::select_dash_video_url(video_data);
+        let audio_addr = Self::select_dash_audio_url(video_data);
+        let bit_rate_play_addr = video_data["bit_rate"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|br| br["play_addr"]["url_list"].as_array())
+            .and_then(|urls| urls.first())
+            .and_then(|u| u.as_str())
+            .map(|s| s.to_string());
+        let fallback_play_addr = self.get_first_url(&video_data["play_addr"]["url_list"]);
+        let download_addr = self.get_first_url_opt(&video_data["download_addr"]["url_list"]);
+        let primary_no_watermark = [
+            bit_rate_play_addr.clone(),
+            self.get_first_url_opt(&video_data["play_addr_h264"]["url_list"]),
+            Some(fallback_play_addr.clone()),
+            self.get_first_url_opt(&video_data["play_addr_lowbr"]["url_list"]),
+            download_addr.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|url| !url.is_empty() && !looks_watermarked_media_url(url));
+        let play_addr = primary_no_watermark
+            .or(bit_rate_play_addr)
+            .or({
+                if fallback_play_addr.is_empty() {
+                    None
+                } else {
+                    Some(fallback_play_addr)
+                }
+            })
+            .unwrap_or_default();
 
         let video = VideoData {
             preview_addr: Some(play_addr.clone()),
             play_addr: play_addr.clone(),
+            dash_addr,
+            audio_addr,
             play_addr_h264: self.get_first_url_opt(&video_data["play_addr_h264"]["url_list"]),
             play_addr_lowbr: self.get_first_url_opt(&video_data["play_addr_lowbr"]["url_list"]),
             download_addr: self.get_first_url_opt(&video_data["download_addr"]["url_list"]),
@@ -540,6 +576,7 @@ impl DouyinClient {
                 arr.iter()
                     .map(|b| BitRateInfo {
                         gear_name: b["gear_name"].as_str().unwrap_or_default().to_string(),
+                        format: b["format"].as_str().unwrap_or_default().to_string(),
                         bit_rate: b["bit_rate"].as_i64().unwrap_or(0),
                         quality_type: b["quality_type"].as_i64().unwrap_or(0) as i32,
                         is_h265: b["is_h265"].as_bool().unwrap_or(false),
@@ -728,6 +765,46 @@ impl DouyinClient {
         None
     }
 
+    fn select_dash_video_url(video_data: &serde_json::Value) -> Option<String> {
+        let bit_rates = video_data["bit_rate"].as_array()?;
+
+        bit_rates
+            .iter()
+            .filter(|bit_rate| bit_rate["format"].as_str() == Some("dash"))
+            .filter(|bit_rate| !bit_rate["is_h265"].as_bool().unwrap_or(false))
+            .find_map(|bit_rate| {
+                let urls = bit_rate["play_addr"]["url_list"].as_array()?;
+                urls.iter()
+                    .filter_map(|value| value.as_str().map(str::trim))
+                    .find(|url| !url.is_empty() && url.contains("media-video-avc1"))
+                    .or_else(|| {
+                        urls.iter()
+                            .filter_map(|value| value.as_str().map(str::trim))
+                            .find(|url| !url.is_empty())
+                    })
+                    .map(str::to_string)
+            })
+    }
+
+    fn select_dash_audio_url(video_data: &serde_json::Value) -> Option<String> {
+        let audio_rates = video_data["bit_rate_audio"].as_array()?;
+
+        for audio_rate in audio_rates {
+            let urls = &audio_rate["audio_meta"]["url_list"];
+            for key in ["main_url", "backup_url", "fallback_url"] {
+                if let Some(url) = urls[key]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                {
+                    return Some(url.to_string());
+                }
+            }
+        }
+
+        None
+    }
+
     fn get_last_url_opt(&self, data: &serde_json::Value) -> Option<String> {
         data.as_array()
             .and_then(|arr| arr.last())
@@ -890,6 +967,8 @@ impl DouyinClient {
         let aweme_id = post.get("aweme_id")?.as_str()?.to_string();
         let (media_type, media_urls) = self.extract_liked_media_info(post);
         let video_data = &post["video"];
+        let dash_addr = Self::select_dash_video_url(video_data);
+        let audio_addr = Self::select_dash_audio_url(video_data);
         let play_addr = self.get_first_url(&video_data["play_addr"]["url_list"]);
 
         let cover_url = post
@@ -926,6 +1005,7 @@ impl DouyinClient {
                     }
                     Some(BitRateInfo {
                         gear_name: b["gear_name"].as_str().unwrap_or_default().to_string(),
+                        format: b["format"].as_str().unwrap_or_default().to_string(),
                         bit_rate: b["bit_rate"].as_i64().unwrap_or(0),
                         quality_type: b["quality_type"].as_i64().unwrap_or(0) as i32,
                         is_h265: b["is_h265"].as_bool().unwrap_or(false),
@@ -976,6 +1056,8 @@ impl DouyinClient {
                 } else {
                     play_addr
                 },
+                dash_addr,
+                audio_addr,
                 play_addr_h264: self.get_first_url_opt(&video_data["play_addr_h264"]["url_list"]),
                 play_addr_lowbr: self.get_first_url_opt(&video_data["play_addr_lowbr"]["url_list"]),
                 download_addr: self.get_first_url_opt(&video_data["download_addr"]["url_list"]),

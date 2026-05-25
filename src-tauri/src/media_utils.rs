@@ -58,7 +58,14 @@ pub fn python_media_type(video: &VideoInfo) -> &'static str {
         MEDIA_TYPE_LIVE_PHOTO
     } else if has_images || video.is_image {
         MEDIA_TYPE_IMAGE
-    } else if !video.video.play_addr.is_empty() {
+    } else if video
+        .video
+        .dash_addr
+        .as_ref()
+        .map(|url| !url.trim().is_empty())
+        .unwrap_or(false)
+        || !video.video.play_addr.is_empty()
+    {
         MEDIA_TYPE_VIDEO
     } else {
         "unknown"
@@ -87,6 +94,18 @@ pub fn python_media_urls(video: &VideoInfo) -> Vec<serde_json::Value> {
     if items.is_empty() {
         if let Some(url) = no_watermark_video_url(video) {
             items.push(serde_json::json!({ "type": MEDIA_TYPE_VIDEO, "url": url }));
+        } else if let Some(dash_addr) = video
+            .video
+            .dash_addr
+            .as_ref()
+            .map(|url| url.trim())
+            .filter(|url| !url.is_empty())
+        {
+            items.push(serde_json::json!({
+                "type": MEDIA_TYPE_VIDEO,
+                "url": dash_addr,
+                "format": "dash",
+            }));
         }
     }
 
@@ -202,6 +221,8 @@ pub fn python_video_summary(
         "origin_cover": video.video.origin_cover,
         "preview_addr": video.video.preview_addr,
         "play_addr": video.video.play_addr,
+        "dash_addr": video.video.dash_addr,
+        "audio_addr": video.video.audio_addr,
         "play_addr_h264": video.video.play_addr_h264,
         "play_addr_lowbr": video.video.play_addr_lowbr,
         "download_addr": video.video.download_addr,
@@ -253,6 +274,8 @@ pub fn python_video_detail_value(video: &VideoInfo) -> serde_json::Value {
             "origin_cover": video.video.origin_cover,
             "preview_addr": video.video.preview_addr,
             "play_addr": video.video.play_addr,
+            "dash_addr": video.video.dash_addr,
+            "audio_addr": video.video.audio_addr,
             "play_addr_h264": video.video.play_addr_h264,
             "play_addr_lowbr": video.video.play_addr_lowbr,
             "download_addr": video.video.download_addr,
@@ -303,6 +326,8 @@ pub fn python_recommended_video(video: &VideoInfo) -> serde_json::Value {
             "origin_cover": video.video.origin_cover,
             "preview_addr": video.video.preview_addr,
             "play_addr": video.video.play_addr,
+            "dash_addr": video.video.dash_addr,
+            "audio_addr": video.video.audio_addr,
             "play_addr_h264": video.video.play_addr_h264,
             "play_addr_lowbr": video.video.play_addr_lowbr,
             "download_addr": video.video.download_addr,

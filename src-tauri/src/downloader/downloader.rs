@@ -13,7 +13,8 @@ use reqwest::header::{
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
@@ -83,6 +84,8 @@ struct DownloadRuntime {
     cancel_tokens: Arc<Mutex<HashMap<String, bool>>>,
     pause_tokens: Arc<Mutex<HashMap<String, bool>>>,
     history: Arc<Mutex<HistoryManager>>,
+    downloaded_cache: Arc<RwLock<HashSet<String>>>,
+    record_write_lock: Arc<Mutex<()>>,
 }
 
 /// 下载器
@@ -95,6 +98,9 @@ pub struct Downloader {
     cancel_tokens: Arc<Mutex<HashMap<String, bool>>>,
     pause_tokens: Arc<Mutex<HashMap<String, bool>>>,
     history: Arc<Mutex<HistoryManager>>,
+    downloaded_cache: Arc<RwLock<HashSet<String>>>,
+    downloaded_cache_loaded: Arc<AtomicBool>,
+    record_write_lock: Arc<Mutex<()>>,
 }
 
 fn build_download_client(config: &AppConfig) -> Result<reqwest::Client> {
@@ -127,25 +133,54 @@ impl Downloader {
             cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
             pause_tokens: Arc::new(Mutex::new(HashMap::new())),
             history: Arc::new(Mutex::new(HistoryManager::load())),
+            downloaded_cache: Arc::new(RwLock::new(HashSet::new())),
+            downloaded_cache_loaded: Arc::new(AtomicBool::new(false)),
+            record_write_lock: Arc::new(Mutex::new(())),
         })
     }
 
     pub fn update_config(&mut self, config: AppConfig) -> Result<()> {
+        let download_path_changed = self.config.download_path != config.download_path;
         if self.config.proxy != config.proxy {
             self.client = build_download_client(&config)?;
         }
         self.config = config;
+        if download_path_changed {
+            if let Ok(mut cache) = self.downloaded_cache.write() {
+                cache.clear();
+            }
+            self.downloaded_cache_loaded.store(false, Ordering::Release);
+        }
         Ok(())
+    }
+
+    async fn ensure_downloaded_cache(&self) {
+        ensure_downloaded_cache(
+            self.config.download_path.clone(),
+            &self.downloaded_cache,
+            &self.downloaded_cache_loaded,
+        )
+        .await;
     }
 
     /// 检查是否已下载（用于去重）
     pub async fn is_downloaded(&self, aweme_id: &str) -> bool {
-        let history = self.history.lock().await;
-        is_downloaded_existing(
-            &history,
-            &PathBuf::from(&self.config.download_path),
-            aweme_id,
-        )
+        if self
+            .history
+            .lock()
+            .await
+            .get(aweme_id)
+            .map(|record| Path::new(&record.file_path).is_file())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        self.ensure_downloaded_cache().await;
+        self.downloaded_cache
+            .read()
+            .map(|cache| cache.contains(aweme_id))
+            .unwrap_or(false)
     }
 
     /// 添加视频下载任务
@@ -290,6 +325,8 @@ impl Downloader {
             cancel_tokens: self.cancel_tokens.clone(),
             pause_tokens: self.pause_tokens.clone(),
             history: self.history.clone(),
+            downloaded_cache: self.downloaded_cache.clone(),
+            record_write_lock: self.record_write_lock.clone(),
         };
 
         runtime
@@ -654,7 +691,12 @@ impl Downloader {
         }
 
         // 写入本地隐藏去重记录
-        let _ = record_downloaded(&save_dir, &task.aweme_id).await;
+        if record_downloaded(&save_dir, &task.aweme_id, &runtime.record_write_lock)
+            .await
+            .is_ok()
+        {
+            add_to_downloaded_cache(&runtime.downloaded_cache, &task.aweme_id);
+        }
 
         emit_event(
             &runtime.progress_tx,
@@ -811,8 +853,12 @@ impl Downloader {
         let pause_tokens = self.pause_tokens.clone();
         let progress_tx = self.progress_tx.clone();
         let history = self.history.clone();
+        let downloaded_cache = self.downloaded_cache.clone();
+        let record_write_lock = self.record_write_lock.clone();
         let config = self.config.clone();
         let http_client = self.client.clone();
+
+        self.ensure_downloaded_cache().await;
 
         let batch_id_fetch = batch_task_id.clone();
         let sec_uid_clone = sec_uid.clone();
@@ -908,6 +954,8 @@ impl Downloader {
             let pause_tokens = pause_tokens.clone();
             let progress_tx = progress_tx.clone();
             let history = history.clone();
+            let downloaded_cache = downloaded_cache.clone();
+            let record_write_lock = record_write_lock.clone();
             let config = config.clone();
             let http_client = http_client.clone();
             let total_discovered = total_discovered.clone();
@@ -951,23 +999,19 @@ impl Downloader {
                         }
                     };
 
-                    // 获取信号量许可
-                    let permit = match semaphore.clone().acquire_owned().await {
-                        Ok(p) => p,
-                        Err(_) => break,
-                    };
-
                     // 检查是否已下载
                     {
-                        let should_skip = {
-                            let history_lock = history.lock().await;
-                            is_downloaded_existing(
-                                &history_lock,
-                                &PathBuf::from(&config.download_path),
-                                &video.aweme_id,
-                            )
-                        };
-                        if should_skip {
+                        let is_in_history = history
+                            .lock()
+                            .await
+                            .get(&video.aweme_id)
+                            .map(|record| Path::new(&record.file_path).is_file())
+                            .unwrap_or(false);
+                        let is_in_cache = downloaded_cache
+                            .read()
+                            .map(|cache| cache.contains(&video.aweme_id))
+                            .unwrap_or(false);
+                        if is_in_history || is_in_cache {
                             skipped.fetch_add(1, AtomicOrdering::SeqCst);
                             let current = completed.fetch_add(1, AtomicOrdering::SeqCst) + 1;
                             let total =
@@ -989,14 +1033,19 @@ impl Downloader {
                                     "status": "downloading"
                                 }),
                             ).await;
-
-                            drop(permit);
                             continue;
                         }
                     }
 
+                    // 获取信号量许可。已下载视频已经在上方跳过，不占用并发额度。
+                    let permit = match semaphore.clone().acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => break,
+                    };
+
                     // 克隆变量
                     let history = history.clone();
+                    let downloaded_cache = downloaded_cache.clone();
                     let cancel_tokens = cancel_tokens.clone();
                     let pause_tokens = pause_tokens.clone();
                     let progress_tx = progress_tx.clone();
@@ -1008,6 +1057,7 @@ impl Downloader {
                     let batch_started_at = batch_started_at;
                     let config = config.clone();
                     let http_client = http_client.clone();
+                    let record_write_lock = record_write_lock.clone();
 
                     let aweme_id = video.aweme_id.clone();
                     let _display_name = truncate_chars(&video.desc, 8);
@@ -1020,6 +1070,8 @@ impl Downloader {
                             config,
                             video,
                             history,
+                            downloaded_cache,
+                            record_write_lock,
                             cancel_tokens.clone(),
                             pause_tokens.clone(),
                             batch_id.clone(),
@@ -1161,6 +1213,8 @@ impl Downloader {
         config: AppConfig,
         video: VideoInfo,
         history: Arc<Mutex<HistoryManager>>,
+        downloaded_cache: Arc<RwLock<HashSet<String>>>,
+        record_write_lock: Arc<Mutex<()>>,
         cancel_tokens: Arc<Mutex<std::collections::HashMap<String, bool>>>,
         pause_tokens: Arc<Mutex<std::collections::HashMap<String, bool>>>,
         batch_task_id: String,
@@ -1362,7 +1416,12 @@ impl Downloader {
         }
 
         // 写入本地隐藏去重记录
-        let _ = record_downloaded(&author_dir, &video.aweme_id).await;
+        if record_downloaded(&author_dir, &video.aweme_id, &record_write_lock)
+            .await
+            .is_ok()
+        {
+            add_to_downloaded_cache(&downloaded_cache, &video.aweme_id);
+        }
 
         Ok(())
     }
@@ -1466,6 +1525,7 @@ impl Downloader {
         let failed_count = Arc::new(AtomicUsize::new(0));
 
         let mut download_handles = Vec::new();
+        self.ensure_downloaded_cache().await;
 
         for video in videos {
             // 检查取消
@@ -1479,20 +1539,8 @@ impl Downloader {
                 break;
             }
 
-            let Ok(permit) = semaphore.clone().acquire_owned().await else {
-                break;
-            };
-
             // 检查是否已下载（去重）
-            let should_skip = {
-                let history_lock = self.history.lock().await;
-                is_downloaded_existing(
-                    &history_lock,
-                    &PathBuf::from(&self.config.download_path),
-                    &video.aweme_id,
-                )
-            };
-            if should_skip {
+            if self.is_downloaded(&video.aweme_id).await {
                 skipped_count.fetch_add(1, AtomicOrdering::SeqCst);
                 let current = completed_count.fetch_add(1, AtomicOrdering::SeqCst) + 1;
 
@@ -1514,15 +1562,20 @@ impl Downloader {
                                     }),
                 ).await;
 
-                drop(permit);
                 continue;
             }
+
+            let Ok(permit) = semaphore.clone().acquire_owned().await else {
+                break;
+            };
 
             // 克隆必要的数据
             let client = self.client.clone();
             let config = self.config.clone();
             let tasks = self.tasks.clone();
             let history = self.history.clone();
+            let downloaded_cache = self.downloaded_cache.clone();
+            let record_write_lock = self.record_write_lock.clone();
             let cancel_tokens = self.cancel_tokens.clone();
             let pause_tokens = self.pause_tokens.clone();
             let progress_tx = self.progress_tx.clone();
@@ -1613,6 +1666,8 @@ impl Downloader {
                     task_id,
                     progress_tx.clone(),
                     history,
+                    downloaded_cache,
+                    record_write_lock,
                     cancel_tokens.clone(),
                     pause_tokens.clone(),
                     batch_id.clone(),
@@ -1744,6 +1799,8 @@ impl Downloader {
         task_id: String,
         progress_tx: Option<mpsc::Sender<DownloaderEvent>>,
         history: Arc<Mutex<HistoryManager>>,
+        downloaded_cache: Arc<RwLock<HashSet<String>>>,
+        record_write_lock: Arc<Mutex<()>>,
         cancel_tokens: Arc<Mutex<std::collections::HashMap<String, bool>>>,
         pause_tokens: Arc<Mutex<std::collections::HashMap<String, bool>>>,
         batch_task_id: String,
@@ -1947,7 +2004,12 @@ impl Downloader {
         }
 
         // 写入本地隐藏去重记录
-        let _ = record_downloaded(&save_dir, &task.aweme_id).await;
+        if record_downloaded(&save_dir, &task.aweme_id, &record_write_lock)
+            .await
+            .is_ok()
+        {
+            add_to_downloaded_cache(&downloaded_cache, &task.aweme_id);
+        }
 
         // 发送完成事件
         let elapsed = start_time.elapsed().as_secs_f64().max(0.001);
@@ -1982,7 +2044,8 @@ async fn load_downloaded_set(dir: &Path) -> HashSet<String> {
 }
 
 /// 将 aweme_id 写入作者目录的隐藏文件 `.downloaded`
-async fn record_downloaded(dir: &Path, aweme_id: &str) -> Result<()> {
+async fn record_downloaded(dir: &Path, aweme_id: &str, write_lock: &Arc<Mutex<()>>) -> Result<()> {
+    let _guard = write_lock.lock().await;
     let record_path = dir.join(".downloaded");
     tokio::fs::create_dir_all(dir).await?;
 
@@ -1993,21 +2056,15 @@ async fn record_downloaded(dir: &Path, aweme_id: &str) -> Result<()> {
 
     let mut set = load_downloaded_set(dir).await;
     if set.insert(aweme_id.to_string()) {
-        let needs_leading_newline = tokio::fs::metadata(&record_path)
-            .await
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false);
-        let line = if needs_leading_newline {
-            format!("\n{}", aweme_id)
-        } else {
-            aweme_id.to_string()
-        };
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&record_path)
-            .await?;
-        file.write_all(line.as_bytes()).await?;
+        let temp_path = record_path.with_extension("downloaded.tmp");
+        let mut lines = set.into_iter().collect::<Vec<_>>();
+        lines.sort();
+        let content = format!("{}\n", lines.join("\n"));
+        let mut file = File::create(&temp_path).await?;
+        file.write_all(content.as_bytes()).await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&temp_path, &record_path).await?;
     }
     Ok(())
 }
@@ -2033,7 +2090,8 @@ fn parse_downloaded_set(content: &str) -> HashSet<String> {
 }
 
 fn load_all_downloaded_set(root: &Path) -> HashSet<String> {
-    let mut result = HashSet::new();
+    let mut recorded_ids = HashSet::new();
+    let mut file_ids = HashSet::new();
     let mut stack = vec![root.to_path_buf()];
 
     while let Some(dir) = stack.pop() {
@@ -2046,63 +2104,92 @@ fn load_all_downloaded_set(root: &Path) -> HashSet<String> {
                 stack.push(path);
             } else if path.file_name().and_then(|name| name.to_str()) == Some(".downloaded") {
                 if let Ok(content) = std::fs::read_to_string(&path) {
-                    result.extend(parse_downloaded_set(&content));
+                    recorded_ids.extend(parse_downloaded_set(&content));
+                }
+            } else if let Some(filename) = path.file_name().and_then(|name| name.to_str()) {
+                if !is_complete_download_file(&path, filename) {
+                    continue;
+                }
+                if let Some(aweme_id) = extract_downloaded_aweme_id(filename) {
+                    file_ids.insert(aweme_id);
                 }
             }
         }
     }
 
-    result
+    recorded_ids.intersection(&file_ids).cloned().collect()
 }
 
-fn is_downloaded_existing(history: &HistoryManager, root: &Path, aweme_id: &str) -> bool {
+fn is_complete_download_file(path: &Path, filename: &str) -> bool {
+    let lower_filename = filename.to_ascii_lowercase();
+    if filename.is_empty()
+        || filename.starts_with('.')
+        || lower_filename == "download_record.json"
+        || lower_filename.ends_with(".tmp")
+        || lower_filename.ends_with(".part")
+        || lower_filename.ends_with(".download")
+        || lower_filename.ends_with(".crdownload")
+    {
+        return false;
+    }
+
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 4096)
+        .unwrap_or(false)
+}
+
+fn extract_downloaded_aweme_id(filename: &str) -> Option<String> {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|value| value.to_str())?;
+    let parts = stem.rsplit('_').collect::<Vec<_>>();
+    let candidate = match parts.as_slice() {
+        [index, aweme_id, ..]
+            if index.len() == 2 && index.chars().all(|ch| ch.is_ascii_digit()) =>
+        {
+            *aweme_id
+        }
+        [aweme_id, ..] => *aweme_id,
+        _ => return None,
+    };
+
+    if (10..=25).contains(&candidate.len()) && candidate.chars().all(|ch| ch.is_ascii_digit()) {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
+}
+
+async fn ensure_downloaded_cache(
+    download_path: String,
+    cache: &Arc<RwLock<HashSet<String>>>,
+    loaded: &Arc<AtomicBool>,
+) {
+    if loaded.load(Ordering::Acquire) {
+        return;
+    }
+
+    let root = PathBuf::from(download_path);
+    let scanned = tokio::task::spawn_blocking(move || load_all_downloaded_set(&root)).await;
+    let Ok(scanned) = scanned else {
+        return;
+    };
+
+    if let Ok(mut cache_lock) = cache.write() {
+        cache_lock.extend(scanned);
+        loaded.store(true, Ordering::Release);
+    }
+}
+
+fn add_to_downloaded_cache(cache: &Arc<RwLock<HashSet<String>>>, aweme_id: &str) {
     let aweme_id = aweme_id.trim();
     if aweme_id.is_empty() {
-        return false;
+        return;
     }
 
-    if history
-        .get(aweme_id)
-        .map(|record| Path::new(&record.file_path).is_file())
-        .unwrap_or(false)
-    {
-        return true;
+    if let Ok(mut cache_lock) = cache.write() {
+        cache_lock.insert(aweme_id.to_string());
     }
-
-    load_all_downloaded_set(root).contains(aweme_id) && file_exists_for_aweme(root, aweme_id)
-}
-
-fn file_exists_for_aweme(root: &Path, aweme_id: &str) -> bool {
-    if aweme_id.trim().is_empty() {
-        return false;
-    }
-
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-
-            let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if filename.starts_with('.') || filename == "download_record.json" {
-                continue;
-            }
-            if filename.contains(aweme_id) && path.is_file() {
-                return true;
-            }
-        }
-    }
-
-    false
 }
 
 fn template_value(
@@ -2853,6 +2940,28 @@ mod tests {
         assert!(parsed.contains("1002"));
         assert!(parsed.contains("1003"));
         assert!(parsed.contains("1004"));
+    }
+
+    #[test]
+    fn extracts_only_protected_aweme_id_suffix() {
+        assert_eq!(
+            extract_downloaded_aweme_id("标题123456789012_7380011223344556677.mp4").as_deref(),
+            Some("7380011223344556677")
+        );
+        assert_eq!(
+            extract_downloaded_aweme_id("标题123456789012_7380011223344556677_02.jpg").as_deref(),
+            Some("7380011223344556677")
+        );
+        assert!(extract_downloaded_aweme_id("标题123456789012.mp4").is_none());
+    }
+
+    #[test]
+    fn ignores_partial_download_files_case_insensitively() {
+        let path = PathBuf::from("标题_7380011223344556677.TMP");
+        assert!(!is_complete_download_file(
+            &path,
+            path.file_name().and_then(|name| name.to_str()).unwrap()
+        ));
     }
 
     #[test]

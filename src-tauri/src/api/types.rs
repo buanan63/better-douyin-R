@@ -52,6 +52,8 @@ pub struct AuthorInfo {
 pub struct VideoData {
     pub preview_addr: Option<String>, // 直接存储 URL 字符串
     pub play_addr: String,            // 直接存储 URL 字符串
+    pub dash_addr: Option<String>,
+    pub audio_addr: Option<String>,
     pub play_addr_h264: Option<String>,
     pub play_addr_lowbr: Option<String>,
     pub download_addr: Option<String>,
@@ -70,6 +72,7 @@ pub struct VideoData {
 #[serde(default)]
 pub struct BitRateInfo {
     pub gear_name: String,
+    pub format: String,
     pub bit_rate: i64,
     pub quality_type: i32,
     pub is_h265: bool,
