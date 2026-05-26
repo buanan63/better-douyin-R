@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Douyin Downloader",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "identifier": "com.anyujia.douyin-downloader.rust",
   "build": {
     "frontendDist": "../dist",
@@ -54,7 +54,7 @@
       "endpoints": [
         "https://github.com/anYuJia/douyin-downloader-rust/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZEM0QzRUE5RDAyQjlEQjgKUldTNG5TdlFxVDQ5L2RFcVIydi9xU1YzUVhLb1lwWmRZTlc3V1NQOEIrSDZNenIraTRTZ1NFeU8K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ4N0YyNERCNDcxNjlGRgpSV1QvYVhHMFRmS0hEZmpYNEdhWEFnUExoU1dqUHFiYXhnU2UzWm1Rblo5UUc4MnM0cE13RXFiNAo=",
       "dialog": false
     }
   }
