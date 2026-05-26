@@ -228,7 +228,7 @@ export async function saveConfig(config: Partial<AppConfig>): Promise<{ success:
   const current = await getConfig().catch(() => ({} as Partial<AppConfig>));
   const nextConfig: AppConfig = {
     download_path: config.download_path ?? config.download_dir ?? current.download_path ?? current.download_dir ?? "",
-    filename_template: config.filename_template ?? current.filename_template ?? "{title}_{aweme_id}",
+    filename_template: config.filename_template ?? current.filename_template ?? "{title}",
     max_concurrent: config.max_concurrent ?? current.max_concurrent ?? 3,
     download_quality: config.download_quality ?? current.download_quality ?? "auto",
     auto_create_folder: config.auto_create_folder ?? current.auto_create_folder ?? true,

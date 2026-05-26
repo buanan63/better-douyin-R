@@ -60,7 +60,7 @@ impl Default for AppConfig {
             proxy: None,
             max_concurrent: 3,
             download_quality: default_download_quality(),
-            filename_template: "{title}_{aweme_id}".to_string(),
+            filename_template: "{title}".to_string(),
             auto_create_folder: true,
             folder_name_template: "{author}".to_string(),
             save_metadata: true,

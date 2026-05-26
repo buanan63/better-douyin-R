@@ -428,7 +428,7 @@ impl Default for AppSettings {
             download_path: dirs::download_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| ".".to_string()),
-            filename_template: "{author}_{title}_{date}".to_string(),
+            filename_template: "{title}".to_string(),
             max_concurrent: 3,
             auto_create_folder: true,
             folder_name_template: "{author}".to_string(),

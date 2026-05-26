@@ -16,7 +16,7 @@ env:
     ## 下载建议
 
     - Windows 常规安装：下载 `Douyin.Downloader_*_x64-setup.exe`
-    - Windows 便携版：下载 `Douyin-Downloader_*_x64_portable.exe`
+    - Windows 便携版：下载 `Douyin-Downloader_*_x64_portable.zip`，解压后运行里面的 exe
     - macOS Apple Silicon：下载 `Douyin.Downloader_*_aarch64.dmg` 或 `*_macos-arm64_portable.zip`
     - macOS Intel：下载 `Douyin.Downloader_*_x64.dmg` 或 `*_macos-x64_portable.zip`
     - Linux Debian/Ubuntu：下载 `Douyin.Downloader_*_amd64.deb`
@@ -186,7 +186,7 @@ jobs:
       - name: Build portable exe
         run: cargo tauri build --target x86_64-pc-windows-msvc --no-bundle
 
-      - name: Rename and upload portable exe
+      - name: Package portable exe
         shell: pwsh
         run: |
           $candidates = @(
@@ -216,7 +216,20 @@ jobs:
           Copy-Item $exePath $dest
           Write-Output "Created: $dest"
 
-      - name: Sign portable exe
+          $readme = @"
+          Douyin Downloader Windows portable
+          =================================
+
+          解压后双击 $dest 即可启动。
+
+          如果程序没有窗口或无法启动，请先安装 Microsoft Edge WebView2 Runtime：
+          https://developer.microsoft.com/microsoft-edge/webview2/
+          "@
+          $readme | Set-Content -Path "README-Windows-Portable.txt" -Encoding UTF8
+          Compress-Archive -Path $dest, "README-Windows-Portable.txt" -DestinationPath "Douyin-Downloader_${version}_x64_portable.zip" -Force
+          Write-Output "Created: Douyin-Downloader_${version}_x64_portable.zip"
+
+      - name: Sign portable assets
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -229,7 +242,14 @@ jobs:
           }
           cargo tauri signer sign $portable.FullName
 
-      - name: Upload portable exe to release
+          $portableZip = Get-ChildItem -Path . -Filter "Douyin-Downloader_*_x64_portable.zip" -File | Select-Object -First 1
+          if (-not $portableZip) {
+            Write-Error "Could not find portable zip to sign"
+            exit 1
+          }
+          cargo tauri signer sign $portableZip.FullName
+
+      - name: Upload portable assets to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -237,6 +257,8 @@ jobs:
           files: |
             Douyin-Downloader_*_x64_portable.exe
             Douyin-Downloader_*_x64_portable.exe.sig
+            Douyin-Downloader_*_x64_portable.zip
+            Douyin-Downloader_*_x64_portable.zip.sig
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

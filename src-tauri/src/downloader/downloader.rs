@@ -2669,13 +2669,9 @@ fn generate_filename_with_config(
 ) -> String {
     let normalized_title = desc.split_whitespace().collect::<Vec<_>>().join(" ");
     let normalized_aweme_id = aweme_id.trim();
-    let default = if normalized_aweme_id.is_empty() {
-        "未命名作品".to_string()
-    } else {
-        format!("未命名作品_{}", normalized_aweme_id)
-    };
+    let default = "未命名作品".to_string();
     let template = if config.filename_template.trim().is_empty() {
-        "{title}_{aweme_id}"
+        "{title}"
     } else {
         config.filename_template.trim()
     };
@@ -2691,12 +2687,14 @@ fn generate_filename_with_config(
         media_type,
     );
     let sanitized = sanitize_filename(&rendered);
-    let protected_suffix = if normalized_aweme_id.is_empty() {
-        String::new()
-    } else if sanitized.ends_with(normalized_aweme_id) {
-        normalized_aweme_id.to_string()
+    let protected_suffix = if template.contains("{aweme_id}") && !normalized_aweme_id.is_empty() {
+        if sanitized.ends_with(normalized_aweme_id) {
+            normalized_aweme_id.to_string()
+        } else {
+            format!("_{}", normalized_aweme_id)
+        }
     } else {
-        format!("_{}", normalized_aweme_id)
+        String::new()
     };
     let candidate = if !protected_suffix.is_empty() && !sanitized.ends_with(&protected_suffix) {
         format!("{}{}", sanitized, protected_suffix)
@@ -2965,7 +2963,7 @@ mod tests {
     }
 
     #[test]
-    fn filename_template_keeps_full_title_and_aweme_id() {
+    fn filename_template_can_omit_aweme_id_suffix() {
         let config = AppConfig {
             filename_template: "{title}".to_string(),
             ..Default::default()
@@ -2979,10 +2977,7 @@ mod tests {
             "video",
         );
 
-        assert_eq!(
-            filename,
-            format!("这是 一个 完整 标题 第二段 文案_{}", aweme_id)
-        );
+        assert_eq!(filename, "这是 一个 完整 标题 第二段 文案");
     }
 
     #[test]

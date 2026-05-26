@@ -81,7 +81,7 @@ Python 版见：[DY_video_downloader](https://github.com/anYuJia/DY_video_downlo
 | 平台 | 推荐文件 | 说明 |
 |:---|:---|:---|
 | Windows | `*_x64-setup.exe` | 常规安装版，适合长期使用 |
-| Windows | `*_x64_portable.exe` | 便携版，不需要安装 |
+| Windows | `*_x64_portable.zip` | 便携版，解压后运行 exe |
 | macOS Apple Silicon | `*_aarch64.dmg` 或 `*_macos-arm64_portable.zip` | M1/M2/M3/M4 等芯片 |
 | macOS Intel | `*_x64.dmg` 或 `*_macos-x64_portable.zip` | Intel 芯片 |
 | Linux Debian/Ubuntu | `*_amd64.deb` | 适合 Debian、Ubuntu、Linux Mint 等 |
