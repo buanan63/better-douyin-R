@@ -39,7 +39,7 @@ const assets = {
   darwinArmApp: 'Douyin.Downloader_aarch64.app.tar.gz',
   darwinX64App: 'Douyin.Downloader_x64.app.tar.gz',
   windowsInstaller: `Douyin.Downloader_${appVersion}_x64-setup.exe`,
-  windowsPortable: `Douyin-Downloader_${appVersion}_x64_portable.exe`,
+  windowsPortable: `Douyin-Downloader-v${appVersion}-windows-x64-portable.exe`,
   linuxAppImage: `Douyin.Downloader_${appVersion}_amd64.AppImage`,
   linuxDeb: `Douyin.Downloader_${appVersion}_amd64.deb`,
   linuxRpm: findFile(

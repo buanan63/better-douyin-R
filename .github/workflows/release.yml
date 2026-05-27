@@ -15,10 +15,10 @@ env:
   RELEASE_BODY: |
     ## 下载建议
 
-    - Windows 常规安装：下载 `Douyin.Downloader_*_x64-setup.exe`
-    - Windows 便携版：下载 `Douyin-Downloader_*_x64_portable.zip`，解压后运行里面的 exe
-    - macOS Apple Silicon：下载 `Douyin.Downloader_*_aarch64.dmg` 或 `*_macos-arm64_portable.zip`
-    - macOS Intel：下载 `Douyin.Downloader_*_x64.dmg` 或 `*_macos-x64_portable.zip`
+    - Windows 安装版（推荐大多数用户）：下载 `Douyin.Downloader_*_x64-setup.exe`
+    - Windows 便携版（免安装）：下载 `Douyin-Downloader-v*-windows-x64-portable.zip`，解压后运行里面的 exe
+    - macOS Apple Silicon / M 系列：下载 `Douyin.Downloader_*_aarch64.dmg`，免安装可下 `Douyin-Downloader-v*-macos-arm64-portable.zip`
+    - macOS Intel：下载 `Douyin.Downloader_*_x64.dmg`，免安装可下 `Douyin-Downloader-v*-macos-x64-portable.zip`
     - Linux Debian/Ubuntu：下载 `Douyin.Downloader_*_amd64.deb`
     - Linux Fedora/openSUSE/RHEL：下载 `Douyin.Downloader-*-1.x86_64.rpm`
     - Linux 通用便携：下载 `Douyin.Downloader_*_amd64.AppImage`
@@ -92,7 +92,7 @@ jobs:
             find "src-tauri/target" -maxdepth 6 -name "*.app" -print || true
             exit 1
           fi
-          DEST="Douyin-Downloader_${VERSION}_${{ matrix.label }}_portable.zip"
+          DEST="Douyin-Downloader-v${VERSION}-${{ matrix.label }}-portable.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$DEST"
           echo "Created: $DEST"
 
@@ -101,7 +101,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           draft: false
-          files: Douyin-Downloader_*_${{ matrix.label }}_portable.zip
+          files: Douyin-Downloader-v*-${{ matrix.label }}-portable.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -212,7 +212,7 @@ jobs:
           }
 
           $version = "${{ github.ref_name }}" -replace '^v',''
-          $dest = "Douyin-Downloader_${version}_x64_portable.exe"
+          $dest = "Douyin-Downloader-v${version}-windows-x64-portable.exe"
           Copy-Item $exePath $dest
           Write-Output "Created: $dest"
 
@@ -226,8 +226,8 @@ jobs:
           https://developer.microsoft.com/microsoft-edge/webview2/
           "@
           $readme | Set-Content -Path "README-Windows-Portable.txt" -Encoding UTF8
-          Compress-Archive -Path $dest, "README-Windows-Portable.txt" -DestinationPath "Douyin-Downloader_${version}_x64_portable.zip" -Force
-          Write-Output "Created: Douyin-Downloader_${version}_x64_portable.zip"
+          Compress-Archive -Path $dest, "README-Windows-Portable.txt" -DestinationPath "Douyin-Downloader-v${version}-windows-x64-portable.zip" -Force
+          Write-Output "Created: Douyin-Downloader-v${version}-windows-x64-portable.zip"
 
       - name: Sign portable assets
         shell: pwsh
@@ -235,14 +235,14 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          $portable = Get-ChildItem -Path . -Filter "Douyin-Downloader_*_x64_portable.exe" -File | Select-Object -First 1
+          $portable = Get-ChildItem -Path . -Filter "Douyin-Downloader-v*-windows-x64-portable.exe" -File | Select-Object -First 1
           if (-not $portable) {
             Write-Error "Could not find portable exe to sign"
             exit 1
           }
           cargo tauri signer sign $portable.FullName
 
-          $portableZip = Get-ChildItem -Path . -Filter "Douyin-Downloader_*_x64_portable.zip" -File | Select-Object -First 1
+          $portableZip = Get-ChildItem -Path . -Filter "Douyin-Downloader-v*-windows-x64-portable.zip" -File | Select-Object -First 1
           if (-not $portableZip) {
             Write-Error "Could not find portable zip to sign"
             exit 1
@@ -255,10 +255,10 @@ jobs:
           tag_name: ${{ github.ref_name }}
           draft: false
           files: |
-            Douyin-Downloader_*_x64_portable.exe
-            Douyin-Downloader_*_x64_portable.exe.sig
-            Douyin-Downloader_*_x64_portable.zip
-            Douyin-Downloader_*_x64_portable.zip.sig
+            Douyin-Downloader-v*-windows-x64-portable.exe
+            Douyin-Downloader-v*-windows-x64-portable.exe.sig
+            Douyin-Downloader-v*-windows-x64-portable.zip
+            Douyin-Downloader-v*-windows-x64-portable.zip.sig
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
