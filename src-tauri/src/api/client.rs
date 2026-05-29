@@ -867,6 +867,9 @@ impl DouyinClient {
 
         // 判断媒体类型
         let raw_media_type = data["raw_media_type"].as_i64().map(|v| v as i32);
+        let is_liked = Self::json_boolish_any(data, &["user_digged", "is_liked", "digg_status"]);
+        let is_collected =
+            Self::json_boolish_any(data, &["is_collected", "is_collect", "collect_status"]);
 
         Ok(VideoInfo {
             aweme_id,
@@ -880,6 +883,8 @@ impl DouyinClient {
             is_image,
             media_type,
             has_live_photo,
+            is_liked,
+            is_collected,
             live_photo_urls,
             music,
             raw_media_type,
@@ -889,6 +894,25 @@ impl DouyinClient {
 
     fn get_first_url(&self, data: &serde_json::Value) -> String {
         self.get_first_url_opt(data).unwrap_or_default()
+    }
+
+    fn json_boolish_any(data: &serde_json::Value, keys: &[&str]) -> bool {
+        keys.iter()
+            .filter_map(|key| data.get(*key))
+            .any(Self::json_boolish)
+    }
+
+    fn json_boolish(value: &serde_json::Value) -> bool {
+        if let Some(value) = value.as_bool() {
+            return value;
+        }
+        if let Some(value) = value.as_i64() {
+            return value > 0;
+        }
+        if let Some(value) = value.as_str() {
+            return matches!(value.trim(), "1" | "true" | "True" | "TRUE");
+        }
+        false
     }
 
     fn get_first_url_opt(&self, data: &serde_json::Value) -> Option<String> {
@@ -1263,7 +1287,12 @@ impl DouyinClient {
         bgm_url
     }
 
-    fn build_liked_video_item(&self, post: &serde_json::Value) -> Option<LikedVideoItem> {
+    fn build_liked_video_item(
+        &self,
+        post: &serde_json::Value,
+        default_liked: bool,
+        default_collected: bool,
+    ) -> Option<LikedVideoItem> {
         let aweme_id = post.get("aweme_id")?.as_str()?.to_string();
         let (media_type, media_urls) = self.extract_liked_media_info(post);
         let video_data = &post["video"];
@@ -1344,6 +1373,12 @@ impl DouyinClient {
             raw_media_type: media_type,
             media_urls,
             bgm_url: self.extract_liked_bgm_url(post),
+            is_liked: Self::json_boolish_any(post, &["user_digged", "is_liked", "digg_status"])
+                || default_liked,
+            is_collected: Self::json_boolish_any(
+                post,
+                &["is_collected", "is_collect", "collect_status"],
+            ) || default_collected,
             statistics: Statistics {
                 digg_count: post["statistics"]["digg_count"].as_i64().unwrap_or(0),
                 comment_count: post["statistics"]["comment_count"].as_i64().unwrap_or(0),
@@ -1457,7 +1492,7 @@ impl DouyinClient {
             .map(|items| {
                 items
                     .iter()
-                    .filter_map(|post| self.build_liked_video_item(post))
+                    .filter_map(|post| self.build_liked_video_item(post, true, false))
                     .collect()
             })
             .unwrap_or_default();
@@ -1539,7 +1574,7 @@ impl DouyinClient {
             .map(|items| {
                 items
                     .iter()
-                    .filter_map(|post| self.build_liked_video_item(post))
+                    .filter_map(|post| self.build_liked_video_item(post, false, true))
                     .collect()
             })
             .unwrap_or_default();
@@ -2220,6 +2255,82 @@ impl DouyinClient {
             .ok_or_else(|| anyhow!("Cannot extract video ID from URL"))?;
 
         self.get_video_detail(&aweme_id).await
+    }
+
+    pub async fn set_video_liked(&self, aweme_id: &str, liked: bool) -> Result<serde_json::Value> {
+        let mut params = HashMap::new();
+        params.insert("aweme_id", aweme_id.trim().to_string());
+        params.insert("item_type", "0".to_string());
+        params.insert("type", if liked { "1" } else { "0" }.to_string());
+        params.insert("action_type", if liked { "1" } else { "0" }.to_string());
+
+        self.request_relation_update(
+            "https://www.douyin.com/aweme/v1/web/commit/item/digg/",
+            params,
+            "点赞",
+        )
+        .await
+    }
+
+    pub async fn set_video_collected(
+        &self,
+        aweme_id: &str,
+        collected: bool,
+    ) -> Result<serde_json::Value> {
+        let mut params = HashMap::new();
+        params.insert("aweme_id", aweme_id.trim().to_string());
+        params.insert("action", if collected { "1" } else { "0" }.to_string());
+        params.insert("type", if collected { "1" } else { "0" }.to_string());
+
+        self.request_relation_update(
+            "https://www.douyin.com/aweme/v1/web/aweme/collect/",
+            params,
+            "收藏",
+        )
+        .await
+    }
+
+    async fn request_relation_update(
+        &self,
+        url: &str,
+        params: HashMap<&str, String>,
+        action_name: &str,
+    ) -> Result<serde_json::Value> {
+        if params
+            .get("aweme_id")
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            return Err(anyhow!("作品ID不能为空"));
+        }
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Referer".to_string(),
+            format!(
+                "https://www.douyin.com/video/{}",
+                params.get("aweme_id").cloned().unwrap_or_default()
+            ),
+        );
+        headers.insert(
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded; charset=UTF-8".to_string(),
+        );
+
+        let response = self
+            .request_raw_json_with_options(url, Some(params), "POST", Some(headers), true)
+            .await?;
+
+        let status_code = response["status_code"].as_i64().unwrap_or(0);
+        if status_code != 0 {
+            let status_msg = response["status_msg"]
+                .as_str()
+                .or_else(|| response["message"].as_str())
+                .unwrap_or("请求失败");
+            return Err(anyhow!("{}失败: {}", action_name, status_msg));
+        }
+
+        Ok(response)
     }
 
     /// 验证 Cookie 是否有效

@@ -29,6 +29,7 @@ import type {
   VideoDetailResponse,
   VideoInfo,
   VideoMediaUrl,
+  VideoRelationResponse,
 } from "./contracts";
 
 export type * from "./contracts";
@@ -308,6 +309,14 @@ export async function parseLink(link: string): Promise<LinkParseResponse> {
     video: normalizeVideo(result.video) || undefined,
     videos: normalizeVideos(result.videos),
   };
+}
+
+export async function setVideoLiked(awemeId: string, liked: boolean): Promise<VideoRelationResponse> {
+  return invoke("set_video_liked", { awemeId, aweme_id: awemeId, liked });
+}
+
+export async function setVideoCollected(awemeId: string, collected: boolean): Promise<VideoRelationResponse> {
+  return invoke("set_video_collected", { awemeId, aweme_id: awemeId, collected });
 }
 
 // Download

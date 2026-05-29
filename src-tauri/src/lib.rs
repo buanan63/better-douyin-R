@@ -697,6 +697,15 @@ async fn parse_link(state: State<'_, AppState>, link: String) -> Result<serde_js
         "create_time": video.create_time,
         "desc": video.desc,
         "digg_count": video.statistics.digg_count,
+        "is_liked": video.is_liked,
+        "is_collected": video.is_collected,
+        "statistics": {
+            "digg_count": video.statistics.digg_count,
+            "comment_count": video.statistics.comment_count,
+            "share_count": video.statistics.share_count,
+            "collect_count": video.statistics.collect_count,
+            "play_count": video.statistics.play_count,
+        },
         "media_type": python_media_type(&video),
         "media_urls": python_media_urls(&video),
         "share_count": video.statistics.share_count
@@ -716,6 +725,82 @@ async fn parse_link(state: State<'_, AppState>, link: String) -> Result<serde_js
     }
 
     Ok(response)
+}
+
+#[tauri::command]
+async fn set_video_liked(
+    state: State<'_, AppState>,
+    aweme_id: String,
+    liked: bool,
+) -> Result<serde_json::Value, String> {
+    let aweme_id = aweme_id.trim().to_string();
+    if aweme_id.is_empty() {
+        return Ok(serde_json::json!({
+            "success": false,
+            "message": "作品ID不能为空"
+        }));
+    }
+
+    let client = match get_client(&state).await {
+        Ok(client) => client,
+        Err(_) => {
+            return Ok(cookie_required_response());
+        }
+    };
+
+    match client.set_video_liked(&aweme_id, liked).await {
+        Ok(_) => Ok(serde_json::json!({
+            "success": true,
+            "aweme_id": aweme_id,
+            "is_liked": liked,
+            "message": if liked { "点赞成功" } else { "已取消点赞" }
+        })),
+        Err(e) => Ok(api_login_or_verify_error_response(
+            &client,
+            if liked { "点赞失败" } else { "取消点赞失败" },
+            e,
+            &format!("https://www.douyin.com/video/{}", aweme_id),
+        )
+        .await),
+    }
+}
+
+#[tauri::command]
+async fn set_video_collected(
+    state: State<'_, AppState>,
+    aweme_id: String,
+    collected: bool,
+) -> Result<serde_json::Value, String> {
+    let aweme_id = aweme_id.trim().to_string();
+    if aweme_id.is_empty() {
+        return Ok(serde_json::json!({
+            "success": false,
+            "message": "作品ID不能为空"
+        }));
+    }
+
+    let client = match get_client(&state).await {
+        Ok(client) => client,
+        Err(_) => {
+            return Ok(cookie_required_response());
+        }
+    };
+
+    match client.set_video_collected(&aweme_id, collected).await {
+        Ok(_) => Ok(serde_json::json!({
+            "success": true,
+            "aweme_id": aweme_id,
+            "is_collected": collected,
+            "message": if collected { "收藏成功" } else { "已取消收藏" }
+        })),
+        Err(e) => Ok(api_login_or_verify_error_response(
+            &client,
+            if collected { "收藏失败" } else { "取消收藏失败" },
+            e,
+            &format!("https://www.douyin.com/video/{}", aweme_id),
+        )
+        .await),
+    }
 }
 
 /// 获取视频详情
@@ -2836,6 +2921,8 @@ pub fn run() {
             select_directory,
             parse_url,
             parse_link,
+            set_video_liked,
+            set_video_collected,
             get_video_detail,
             search_user,
             get_user_detail,

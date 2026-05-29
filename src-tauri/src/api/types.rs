@@ -19,6 +19,8 @@ pub struct VideoInfo {
     pub is_image: bool,
     pub media_type: MediaType,
     pub has_live_photo: bool,
+    pub is_liked: bool,
+    pub is_collected: bool,
     /// 实况照片视频URL列表 (前端期望字段名为 live_photos)
     #[serde(rename = "live_photos")]
     pub live_photo_urls: Option<Vec<String>>,
@@ -236,6 +238,8 @@ pub struct LikedVideoItem {
     pub raw_media_type: String,
     pub media_urls: Vec<LikedVideoMediaUrl>,
     pub bgm_url: Option<String>,
+    pub is_liked: bool,
+    pub is_collected: bool,
     pub statistics: Statistics,
     pub video: VideoData,
     pub author: LikedVideoAuthor,
