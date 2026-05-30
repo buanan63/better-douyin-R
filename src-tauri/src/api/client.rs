@@ -46,6 +46,7 @@ pub struct DouyinClient {
     client: reqwest::Client,
     config: AppConfig,
     webid_cache: Arc<Mutex<Option<(String, Instant)>>>,
+    csrf_cache: Arc<Mutex<Option<(String, Instant)>>>,
 }
 
 impl DouyinClient {
@@ -67,6 +68,7 @@ impl DouyinClient {
             client,
             config,
             webid_cache: Arc::new(Mutex::new(None)),
+            csrf_cache: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -155,6 +157,41 @@ impl DouyinClient {
         }
 
         None
+    }
+
+    async fn get_csrf_token(&self, headers: &HashMap<String, String>) -> Option<String> {
+        {
+            let cache = self.csrf_cache.lock().await;
+            if let Some((token, cached_at)) = cache.as_ref() {
+                if cached_at.elapsed() < Duration::from_secs(600) {
+                    return Some(token.clone());
+                }
+            }
+        }
+
+        let mut request = self
+            .client
+            .head("https://www.douyin.com/service/2/abtest_config/")
+            .header("X-Secsdk-Csrf-Request", "1")
+            .header("X-Secsdk-Csrf-Version", "1.2.22");
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+
+        let response = request.send().await.ok()?;
+        let token = response
+            .headers()
+            .get("x-ware-csrf-token")
+            .or_else(|| response.headers().get("X-Ware-Csrf-Token"))
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').find(|part| part.len() > 16))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)?;
+
+        let mut cache = self.csrf_cache.lock().await;
+        *cache = Some((token.clone(), Instant::now()));
+        Some(token)
     }
 
     async fn enrich_request(
@@ -2293,10 +2330,10 @@ impl DouyinClient {
     async fn request_relation_update(
         &self,
         url: &str,
-        params: HashMap<&str, String>,
+        body_params: HashMap<&str, String>,
         action_name: &str,
     ) -> Result<serde_json::Value> {
-        if params
+        if body_params
             .get("aweme_id")
             .map(|value| value.trim().is_empty())
             .unwrap_or(true)
@@ -2304,22 +2341,88 @@ impl DouyinClient {
             return Err(anyhow!("作品ID不能为空"));
         }
 
-        let mut headers = HashMap::new();
+        let mut query_params = crate::config::get_common_params();
+        let mut headers = crate::config::get_common_headers(&self.config.cookie);
         headers.insert(
             "Referer".to_string(),
             format!(
                 "https://www.douyin.com/video/{}",
-                params.get("aweme_id").cloned().unwrap_or_default()
+                body_params.get("aweme_id").cloned().unwrap_or_default()
             ),
         );
+        headers.insert("Origin".to_string(), "https://www.douyin.com".to_string());
         headers.insert(
             "Content-Type".to_string(),
             "application/x-www-form-urlencoded; charset=UTF-8".to_string(),
         );
 
-        let response = self
-            .request_raw_json_with_options(url, Some(params), "POST", Some(headers), true)
-            .await?;
+        self.enrich_request(&mut query_params, &mut headers).await;
+        if let Some(csrf_token) = self.get_csrf_token(&headers).await {
+            headers.insert("x-secsdk-csrf-token".to_string(), csrf_token);
+        } else {
+            log::warn!(
+                "Douyin {} relation update: csrf token unavailable",
+                action_name
+            );
+        }
+        let params_str = serde_urlencoded::to_string(&query_params)?;
+        let user_agent = headers
+            .get("User-Agent")
+            .map(String::as_str)
+            .unwrap_or_else(|| get_user_agent());
+        query_params.insert(
+            "a_bogus".to_string(),
+            sign::sign_detail(&params_str, user_agent),
+        );
+
+        let mut req = self
+            .client
+            .post(url)
+            .query(&query_params)
+            .form(&body_params);
+        for (key, value) in &headers {
+            req = req.header(key, value);
+        }
+
+        let response = req
+            .send()
+            .await
+            .map_err(|error| anyhow!("HTTP request failed: {}", error))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let ticket_guard_result = response
+                .headers()
+                .get("bd-ticket-guard-result")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let passport_security_gateway = response
+                .headers()
+                .get("bd_passport_security_gateway")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            log::warn!(
+                "Douyin {} relation update rejected: http_status={} headers={:?}",
+                action_name,
+                status,
+                response.headers()
+            );
+            if status.as_u16() == 403
+                && (ticket_guard_result.is_some()
+                    || passport_security_gateway.as_deref() == Some("1"))
+            {
+                return Err(anyhow!(
+                    "RELATION_SECURITY_GATEWAY: 抖音安全校验拒绝了{}操作（HTTP 403{}），当前 Cookie 仍会保留，请稍后重试，或先在抖音网页/客户端完成一次同类操作。",
+                    action_name,
+                    ticket_guard_result
+                        .as_deref()
+                        .map(|value| format!(", TicketGuard {}", value))
+                        .unwrap_or_default()
+                ));
+            }
+            return Err(anyhow!("HTTP error: {}", status));
+        }
+
+        let response = response.json::<serde_json::Value>().await?;
 
         let status_code = response["status_code"].as_i64().unwrap_or(0);
         if status_code != 0 {
@@ -2327,6 +2430,13 @@ impl DouyinClient {
                 .as_str()
                 .or_else(|| response["message"].as_str())
                 .unwrap_or("请求失败");
+            log::warn!(
+                "Douyin {} relation update failed: code={} message={} response={}",
+                action_name,
+                status_code,
+                status_msg,
+                response
+            );
             return Err(anyhow!("{}失败: {}", action_name, status_msg));
         }
 

@@ -103,6 +103,26 @@ fn looks_like_verify_error(message: &str) -> bool {
         || lower.contains("passport")
 }
 
+fn looks_like_relation_security_error(message: &str) -> bool {
+    message.contains("RELATION_SECURITY_GATEWAY")
+        || message.contains("bd-ticket-guard")
+        || message.contains("安全校验拒绝")
+}
+
+fn relation_security_blocked_response(prefix: &str, message: &str) -> serde_json::Value {
+    let hint = if message.trim().is_empty() {
+        "抖音安全校验拒绝了本次操作，请稍后重试，或先在抖音网页/客户端完成一次同类操作后再回来使用。"
+    } else {
+        message
+    };
+
+    serde_json::json!({
+        "success": false,
+        "security_blocked": true,
+        "message": format!("{}: {}", prefix, hint)
+    })
+}
+
 fn login_required_message(message: &str) -> String {
     if message.trim().is_empty() || looks_like_login_error(message) {
         "用户未登录，请在设置中重新登录并刷新 Cookie".to_string()
@@ -170,6 +190,8 @@ async fn api_login_or_verify_error_response(
     let message = error.to_string();
     if looks_like_login_error(&message) {
         login_required_response(&message)
+    } else if looks_like_relation_security_error(&message) {
+        relation_security_blocked_response(prefix, &message)
     } else if looks_like_verify_error(&message) {
         login_or_verify_response(client, &format!("{}: {}", prefix, message), verify_url).await
     } else {
@@ -757,7 +779,11 @@ async fn set_video_liked(
         })),
         Err(e) => Ok(api_login_or_verify_error_response(
             &client,
-            if liked { "点赞失败" } else { "取消点赞失败" },
+            if liked {
+                "点赞失败"
+            } else {
+                "取消点赞失败"
+            },
             e,
             &format!("https://www.douyin.com/video/{}", aweme_id),
         )
@@ -795,7 +821,11 @@ async fn set_video_collected(
         })),
         Err(e) => Ok(api_login_or_verify_error_response(
             &client,
-            if collected { "收藏失败" } else { "取消收藏失败" },
+            if collected {
+                "收藏失败"
+            } else {
+                "取消收藏失败"
+            },
             e,
             &format!("https://www.douyin.com/video/{}", aweme_id),
         )
