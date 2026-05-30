@@ -2437,6 +2437,16 @@ impl DouyinClient {
                 status_msg,
                 response
             );
+            if status_code == 8
+                || status_msg.contains("用户未登录")
+                || status_msg.contains("未登录")
+            {
+                return Err(anyhow!(
+                    "RELATION_SECURITY_GATEWAY: 抖音{}动作接口未接受当前网页登录凭据（{}），当前 Cookie 仍会保留。请稍后重试，或先在抖音网页/客户端完成一次同类操作。",
+                    action_name,
+                    status_msg
+                ));
+            }
             return Err(anyhow!("{}失败: {}", action_name, status_msg));
         }
 
