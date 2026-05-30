@@ -10,7 +10,8 @@ pub mod media_utils;
 pub mod sign;
 
 use api::{CookieStatus, DouyinClient, DownloadHistory, UserInfo, VideoInfo};
-use config::AppConfig;
+use base64::Engine;
+use config::{AppConfig, RelationSignerConfig};
 use cookie::{
     has_douyin_login_cookie, parse_cookie_string, serialize_cookie_string,
     verify_douyin_login_cookie, CookieLoginSession,
@@ -50,21 +51,176 @@ const DOUYIN_LOGIN_COOKIE_NAMES: &[&str] = &[
 
 const DOUYIN_COOKIE_CLEAR_DOMAINS: &[&str] = &[
     ".douyin.com",
+    "douyin.com",
     "www.douyin.com",
     "sso.douyin.com",
     "login.douyin.com",
 ];
 
+const RELATION_SIGNER_COOKIE_NAME: &str = "dy_relation_signer";
+
 fn clear_douyin_login_cookies(window: &tauri::WebviewWindow) {
-    for domain in DOUYIN_COOKIE_CLEAR_DOMAINS {
-        for name in DOUYIN_LOGIN_COOKIE_NAMES {
-            if let Ok(cookie) = tauri::webview::Cookie::parse(format!(
-                "{}=; Domain={}; Path=/; Max-Age=0",
-                name, domain
-            )) {
-                let _ = window.set_cookie(cookie.into_owned());
+    let mut names = DOUYIN_LOGIN_COOKIE_NAMES
+        .iter()
+        .map(|name| name.to_string())
+        .collect::<HashSet<_>>();
+    let mut domains = DOUYIN_COOKIE_CLEAR_DOMAINS
+        .iter()
+        .map(|domain| domain.to_string())
+        .collect::<HashSet<_>>();
+
+    if let Ok(cookies) = window.cookies() {
+        for cookie in cookies {
+            if cookie
+                .domain()
+                .map(|domain| {
+                    let domain = domain.trim().trim_start_matches('.').to_ascii_lowercase();
+                    domain == "douyin.com" || domain.ends_with(".douyin.com")
+                })
+                .unwrap_or(false)
+            {
+                names.insert(cookie.name().to_string());
+                if let Some(domain) = cookie.domain() {
+                    domains.insert(domain.to_string());
+                }
             }
         }
+    }
+
+    let mut cleared = 0usize;
+    for domain in domains {
+        for name in &names {
+            for suffix in [
+                "Path=/; Max-Age=0",
+                "Path=/; Max-Age=0; Secure; SameSite=None",
+                "Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+                "Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; SameSite=None",
+            ] {
+                if let Ok(cookie) =
+                    tauri::webview::Cookie::parse(format!("{name}=; Domain={domain}; {suffix}"))
+                {
+                    let _ = window.set_cookie(cookie.into_owned());
+                    cleared += 1;
+                }
+            }
+        }
+    }
+    log::info!(
+        "cleared douyin webview cookies: names={} writes={}",
+        names.len(),
+        cleared
+    );
+}
+
+fn extract_relation_signer_cookie(
+    cookies: &[tauri::webview::Cookie<'static>],
+) -> Option<RelationSignerConfig> {
+    let raw_value = cookies
+        .iter()
+        .rev()
+        .find(|cookie| cookie.name() == RELATION_SIGNER_COOKIE_NAME)?
+        .value()
+        .to_string();
+    let decoded = urlencoding::decode(&raw_value).ok()?.into_owned();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(decoded.as_bytes())
+        .ok()?;
+    let signer = serde_json::from_slice::<RelationSignerConfig>(&bytes).ok()?;
+    if signer.ticket.trim().is_empty()
+        || signer.ts_sign.trim().is_empty()
+        || signer.public_key.trim().is_empty()
+        || signer.ecdh_key.trim().is_empty()
+        || signer.uid.trim().is_empty()
+    {
+        return None;
+    }
+    Some(signer)
+}
+
+fn strip_internal_login_cookies(
+    cookies: &[tauri::webview::Cookie<'static>],
+) -> Vec<tauri::webview::Cookie<'static>> {
+    cookies
+        .iter()
+        .filter(|cookie| cookie.name() != RELATION_SIGNER_COOKIE_NAME)
+        .cloned()
+        .collect()
+}
+
+fn inject_relation_signer_probe(window: &tauri::WebviewWindow) {
+    let script = r#"
+        (() => {
+            if (window.__dyRelationSignerProbeStarted) return;
+            window.__dyRelationSignerProbeStarted = true;
+            const save = (payload) => {
+                try {
+                    const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+                    document.cookie = `dy_relation_signer=${encodeURIComponent(encoded)}; domain=.douyin.com; path=/; max-age=600`;
+                    document.cookie = `dy_relation_signer=${encodeURIComponent(encoded)}; path=/; max-age=600`;
+                } catch (error) {}
+            };
+            const bytesToBase64 = (value) => {
+                const bytes = Array.from(value instanceof Uint8Array ? value : Object.values(value || {}));
+                return btoa(String.fromCharCode(...bytes));
+            };
+            const captureDtrait = () => new Promise((resolve) => {
+                let resolved = false;
+                const originalSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+                const finish = (value) => {
+                    if (resolved) return;
+                    resolved = true;
+                    try { XMLHttpRequest.prototype.setRequestHeader = originalSetHeader; } catch (error) {}
+                    resolve(value || "");
+                };
+                XMLHttpRequest.prototype.setRequestHeader = function(key, value) {
+                    if (String(key).toLowerCase() === "x-tt-session-dtrait") {
+                        try { originalSetHeader.apply(this, arguments); } catch (error) {}
+                        try { this.abort(); } catch (error) {}
+                        finish(String(value || ""));
+                        return;
+                    }
+                    return originalSetHeader.apply(this, arguments);
+                };
+                try {
+                    const xhr = new XMLHttpRequest();
+                    xhr.open("POST", "https://www-hj.douyin.com/aweme/v1/web/commit/item/digg/?device_platform=webapp&aid=6383&channel=channel_pc_web");
+                    xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+                    xhr.onloadend = () => setTimeout(() => finish(""), 0);
+                    xhr.onerror = () => setTimeout(() => finish(""), 0);
+                    xhr.send("aweme_id=0&item_type=0&type=0");
+                } catch (error) {
+                    finish("");
+                }
+                setTimeout(() => finish(""), 2500);
+            });
+            (async () => {
+                try {
+                    const crypto = window.securitySDK && window.securitySDK.cryptoSDK;
+                    if (!crypto) throw new Error("security sdk not ready");
+                    const info = await crypto.getKeysInfoWithOrigin({ certType: "header", scene: "web_protect" });
+                    const ecdh = await crypto.initECDHKey();
+                    const payload = {
+                        ticket: info && info.sign && info.sign.ticket || "",
+                        ts_sign: info && info.sign && info.sign.ts_sign || "",
+                        public_key: info && (info.b64PubKey || (info.sign && info.sign.client_cert || "").replace(/^pub\./, "")) || "",
+                        ecdh_key: bytesToBase64(ecdh),
+                        uid: window.SSR_RENDER_DATA && window.SSR_RENDER_DATA.app && window.SSR_RENDER_DATA.app.odin && window.SSR_RENDER_DATA.app.odin.user_id || "",
+                        dtrait: "",
+                    };
+                    payload.dtrait = await captureDtrait();
+                    if (payload.ticket && payload.ts_sign && payload.public_key && payload.ecdh_key && payload.uid) {
+                        save(payload);
+                    } else {
+                        window.__dyRelationSignerProbeStarted = false;
+                    }
+                } catch (error) {
+                    window.__dyRelationSignerProbeStarted = false;
+                }
+            })();
+        })();
+    "#;
+    if let Err(error) = window.eval(script) {
+        log::debug!("failed to inject relation signer probe: {}", error);
     }
 }
 
@@ -162,6 +318,37 @@ fn relation_security_blocked_response(prefix: &str, message: &str) -> serde_json
     })
 }
 
+fn set_douyin_cookies(window: &tauri::WebviewWindow, cookie_string: &str) {
+    let mut count = 0usize;
+    for cookie in parse_cookie_string(cookie_string) {
+        if window.set_cookie(cookie).is_ok() {
+            count += 1;
+        }
+    }
+
+    for item in cookie_string.split(';') {
+        let item = item.trim();
+        let Some((name, value)) = item.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        for domain in [".douyin.com", "www.douyin.com"] {
+            if let Ok(cookie) = tauri::webview::Cookie::parse(format!(
+                "{}={}; Domain={}; Path=/; Secure; SameSite=None",
+                name,
+                value.trim(),
+                domain
+            )) {
+                let _ = window.set_cookie(cookie.into_owned());
+            }
+        }
+    }
+    log::info!("injected {} saved douyin cookies into webview", count);
+}
+
 fn login_required_message(message: &str) -> String {
     if message.trim().is_empty() || looks_like_login_error(message) {
         "用户未登录，请在设置中重新登录并刷新 Cookie".to_string()
@@ -202,8 +389,9 @@ fn verify_required_response(message: &str, verify_url: &str) -> serde_json::Valu
 }
 
 async fn login_required_if_cookie_invalid(client: &DouyinClient) -> Option<serde_json::Value> {
-    match client.get_current_user().await {
-        Ok(_) => None,
+    match client.verify_cookie().await {
+        Ok(status) if status.valid => None,
+        Ok(status) => Some(login_required_response(&status.message)),
         Err(error) => Some(login_required_response(&error.to_string())),
     }
 }
@@ -227,12 +415,30 @@ async fn api_login_or_verify_error_response(
     verify_url: &str,
 ) -> serde_json::Value {
     let message = error.to_string();
-    if looks_like_login_error(&message) {
-        login_required_response(&message)
-    } else if looks_like_relation_security_error(&message) {
+    if looks_like_relation_security_error(&message) {
         relation_security_blocked_response(prefix, &message)
+    } else if looks_like_login_error(&message) {
+        login_or_verify_response(client, &format!("{}: {}", prefix, message), verify_url).await
     } else if looks_like_verify_error(&message) {
         login_or_verify_response(client, &format!("{}: {}", prefix, message), verify_url).await
+    } else {
+        serde_json::json!({
+            "success": false,
+            "message": format!("{}: {}", prefix, message)
+        })
+    }
+}
+
+fn api_verify_or_error_response(
+    prefix: &str,
+    error: impl std::fmt::Display,
+    verify_url: &str,
+) -> serde_json::Value {
+    let message = error.to_string();
+    if looks_like_relation_security_error(&message) {
+        relation_security_blocked_response(prefix, &message)
+    } else if looks_like_login_error(&message) || looks_like_verify_error(&message) {
+        verify_required_response(&format!("{}: {}", prefix, message), verify_url)
     } else {
         serde_json::json!({
             "success": false,
@@ -387,9 +593,7 @@ async fn open_verify_browser(
     if let Some(window) = app.get_webview_window("verify-browser") {
         let _ = window.set_focus();
         let _ = window.show();
-        for cookie in parse_cookie_string(&cookie) {
-            let _ = window.set_cookie(cookie);
-        }
+        set_douyin_cookies(&window, &cookie);
         let _ = window.navigate(target_url);
         return Ok(serde_json::json!({
             "success": true,
@@ -410,9 +614,7 @@ async fn open_verify_browser(
     .build()
     .map_err(|error| format!("无法打开验证窗口: {}", error))?;
 
-    for cookie in parse_cookie_string(&cookie) {
-        let _ = window.set_cookie(cookie);
-    }
+    set_douyin_cookies(&window, &cookie);
     let _ = window.navigate(target_url);
 
     Ok(serde_json::json!({
@@ -434,11 +636,13 @@ async fn cookie_browser_login(
     let login_url = Url::parse("https://www.douyin.com/").map_err(|error| error.to_string())?;
 
     if let Some(window) = app.get_webview_window(&label) {
+        clear_douyin_login_cookies(&window);
+        let _ = window.navigate(login_url.clone());
         let _ = window.show();
         let _ = window.set_focus();
         return Ok(serde_json::json!({
             "success": true,
-            "message": "登录窗口已打开"
+            "message": "登录窗口已重置，请重新登录"
         }));
     }
 
@@ -559,7 +763,9 @@ async fn cookie_browser_login(
                                 })
                         })
                         .collect();
-                    let cookie_string = serialize_cookie_string(&cookies);
+                    let relation_signer = extract_relation_signer_cookie(&cookies);
+                    let public_cookies = strip_internal_login_cookies(&cookies);
+                    let cookie_string = serialize_cookie_string(&public_cookies);
                     log::info!(
                         "cookie browser login poll: cookie_count={} names={}",
                         cookies.len(),
@@ -571,6 +777,9 @@ async fn cookie_browser_login(
                     );
 
                     if has_douyin_login_cookie(&cookies) {
+                        if relation_signer.is_none() {
+                            inject_relation_signer_probe(&window);
+                        }
                         let should_verify = last_verify_attempt
                             .as_ref()
                             .map(|(last_cookie, last_at)| {
@@ -618,6 +827,7 @@ async fn cookie_browser_login(
                         );
                         let mut next_config = config_state.lock().await.clone();
                         next_config.cookie = cookie_string.clone();
+                        next_config.relation_signer = relation_signer;
                         if let Err(error) = next_config.save() {
                             emit_cookie_login_status(
                                 &app,
@@ -956,7 +1166,7 @@ async fn search_user(
         Err(e) => {
             let message = e.to_string();
             if looks_like_login_error(&message) {
-                Ok(login_required_response(&message))
+                Ok(login_or_verify_response(&client, &message, "https://www.douyin.com/").await)
             } else if looks_like_verify_error(&message) {
                 Ok(login_or_verify_response(&client, &message, "https://www.douyin.com/").await)
             } else {
@@ -1108,9 +1318,7 @@ async fn get_liked_videos(
             }))
         }
         Ok((videos, next_cursor, _has_more)) => {
-            if let Some(response) = login_required_if_cookie_invalid(&client).await {
-                Ok(response)
-            } else if cursor > 0 {
+            if cursor > 0 {
                 Ok(serde_json::json!({
                     "success": true,
                     "data": videos,
@@ -1127,10 +1335,11 @@ async fn get_liked_videos(
         }
         Err(e) => {
             let message = e.to_string();
-            if looks_like_login_error(&message) {
-                Ok(login_required_response(&message))
-            } else if looks_like_verify_error(&message) {
-                Ok(login_or_verify_response(&client, &message, "https://www.douyin.com/").await)
+            if looks_like_login_error(&message) || looks_like_verify_error(&message) {
+                Ok(verify_required_response(
+                    &format!("获取点赞视频失败: {}", message),
+                    "https://www.douyin.com/",
+                ))
             } else {
                 Ok(serde_json::json!({
                     "success": false,
@@ -1166,13 +1375,11 @@ async fn get_collected_videos(
             "cursor": next_cursor,
             "has_more": has_more
         })),
-        Err(error) => Ok(api_login_or_verify_error_response(
-            &client,
+        Err(error) => Ok(api_verify_or_error_response(
             "获取收藏视频失败",
             error,
             "https://www.douyin.com/user/self?showTab=favorite_collection",
-        )
-        .await),
+        )),
     }
 }
 
@@ -1198,13 +1405,11 @@ async fn get_collected_mixes(
             "cursor": next_cursor,
             "has_more": has_more
         })),
-        Err(error) => Ok(api_login_or_verify_error_response(
-            &client,
+        Err(error) => Ok(api_verify_or_error_response(
             "获取收藏合集失败",
             error,
             "https://www.douyin.com/user/self?showTab=favorite_collection",
-        )
-        .await),
+        )),
     }
 }
 

@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub download_path: String,
     /// Cookie
     pub cookie: String,
+    /// 抖音关系动作签名数据
+    pub relation_signer: Option<RelationSignerConfig>,
     /// 代理设置
     pub proxy: Option<String>,
     /// 最大并发下载数
@@ -41,6 +43,17 @@ pub struct AppConfig {
     pub language: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RelationSignerConfig {
+    pub ticket: String,
+    pub ts_sign: String,
+    pub public_key: String,
+    pub ecdh_key: String,
+    pub uid: String,
+    pub dtrait: String,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -57,6 +70,7 @@ impl Default for AppConfig {
         Self {
             download_path,
             cookie: String::new(),
+            relation_signer: None,
             proxy: None,
             max_concurrent: 3,
             download_quality: default_download_quality(),

@@ -4,10 +4,12 @@ use crate::config::{get_user_agent, AppConfig};
 use crate::sign;
 use anyhow::{anyhow, Result};
 use base64::Engine;
+use hmac::{Hmac, Mac};
 use rand::{distributions::Alphanumeric, Rng};
 use regex::Regex;
 use reqwest::redirect::Policy;
 use serde::de::DeserializeOwned;
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -41,13 +43,14 @@ fn json_bit_rate_metric(bit_rate: &serde_json::Value) -> i64 {
     }
 }
 
+type HmacSha256 = Hmac<Sha256>;
+
 /// 抖音 API 客户端
 #[derive(Clone)]
 pub struct DouyinClient {
     client: reqwest::Client,
     config: AppConfig,
     webid_cache: Arc<Mutex<Option<(String, Instant)>>>,
-    csrf_cache: Arc<Mutex<Option<(String, Instant)>>>,
 }
 
 impl DouyinClient {
@@ -69,7 +72,6 @@ impl DouyinClient {
             client,
             config,
             webid_cache: Arc::new(Mutex::new(None)),
-            csrf_cache: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -132,9 +134,111 @@ impl DouyinClient {
                     );
                 }
             }
+
+            headers
+                .entry("bd-ticket-guard-web-sign-type".to_string())
+                .or_insert_with(|| "0".to_string());
         }
 
         headers
+    }
+
+    fn decode_relation_ecdh_key(value: &str) -> Option<Vec<u8>> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        if trimmed.len() == 64 && trimmed.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            let mut out = Vec::with_capacity(32);
+            for index in (0..trimmed.len()).step_by(2) {
+                let byte = u8::from_str_radix(&trimmed[index..index + 2], 16).ok()?;
+                out.push(byte);
+            }
+            return Some(out);
+        }
+
+        base64::engine::general_purpose::STANDARD
+            .decode(trimmed.as_bytes())
+            .ok()
+    }
+
+    fn relation_ticket_guard_headers(&self, path: &str) -> HashMap<String, String> {
+        let Some(signer) = self.config.relation_signer.as_ref() else {
+            return Self::ticket_guard_headers_from_cookie(&self.config.cookie);
+        };
+        let ticket = signer.ticket.trim();
+        let ts_sign = signer.ts_sign.trim();
+        let public_key = signer.public_key.trim();
+        let Some(ecdh_key) = Self::decode_relation_ecdh_key(&signer.ecdh_key) else {
+            log::warn!("Douyin relation signer ecdh_key is unavailable or invalid");
+            return Self::ticket_guard_headers_from_cookie(&self.config.cookie);
+        };
+        if ticket.is_empty() || ts_sign.is_empty() || public_key.is_empty() {
+            log::warn!("Douyin relation signer is incomplete");
+            return Self::ticket_guard_headers_from_cookie(&self.config.cookie);
+        }
+
+        let timestamp = chrono::Utc::now().timestamp();
+        let sign_data = format!("ticket={ticket}&path={path}&timestamp={timestamp}");
+        let mut mac = match HmacSha256::new_from_slice(&ecdh_key) {
+            Ok(mac) => mac,
+            Err(_) => return Self::ticket_guard_headers_from_cookie(&self.config.cookie),
+        };
+        mac.update(sign_data.as_bytes());
+        let req_sign =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        let client_data = serde_json::json!({
+            "ts_sign": ts_sign,
+            "req_content": "ticket,path,timestamp",
+            "req_sign": req_sign,
+            "timestamp": timestamp,
+        });
+        let client_data = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&client_data).unwrap_or_default());
+
+        HashMap::from([
+            (
+                "bd-ticket-guard-ree-public-key".to_string(),
+                public_key.to_string(),
+            ),
+            ("bd-ticket-guard-web-version".to_string(), "2".to_string()),
+            ("bd-ticket-guard-web-sign-type".to_string(), "1".to_string()),
+            ("bd-ticket-guard-version".to_string(), "2".to_string()),
+            (
+                "bd-ticket-guard-iteration-version".to_string(),
+                "1".to_string(),
+            ),
+            ("bd-ticket-guard-client-data".to_string(), client_data),
+        ])
+    }
+
+    fn relation_uid_hash(&self) -> Option<String> {
+        let cookie_dict = Self::cookies_to_dict(&self.config.cookie);
+        let uid = self
+            .config
+            .relation_signer
+            .as_ref()
+            .map(|signer| signer.uid.trim().to_string())
+            .filter(|uid| !uid.is_empty())
+            .or_else(|| cookie_dict.get("uid_tt").cloned())
+            .or_else(|| cookie_dict.get("uid_tt_ss").cloned())?;
+        if uid.is_empty() {
+            return None;
+        }
+        if uid.len() == 32 && uid.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Some(uid.to_ascii_lowercase());
+        }
+        Some(format!("{:x}", md5::compute(uid.as_bytes())))
+    }
+
+    fn relation_dtrait(&self) -> Option<String> {
+        let value = self.config.relation_signer.as_ref()?.dtrait.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
     }
 
     fn generate_ms_token() -> String {
@@ -205,41 +309,6 @@ impl DouyinClient {
         }
 
         None
-    }
-
-    async fn get_csrf_token(&self, headers: &HashMap<String, String>) -> Option<String> {
-        {
-            let cache = self.csrf_cache.lock().await;
-            if let Some((token, cached_at)) = cache.as_ref() {
-                if cached_at.elapsed() < Duration::from_secs(600) {
-                    return Some(token.clone());
-                }
-            }
-        }
-
-        let mut request = self
-            .client
-            .head("https://www.douyin.com/service/2/abtest_config/")
-            .header("X-Secsdk-Csrf-Request", "1")
-            .header("X-Secsdk-Csrf-Version", "1.2.22");
-        for (key, value) in headers {
-            request = request.header(key, value);
-        }
-
-        let response = request.send().await.ok()?;
-        let token = response
-            .headers()
-            .get("x-ware-csrf-token")
-            .or_else(|| response.headers().get("X-Ware-Csrf-Token"))
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').find(|part| part.len() > 16))
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)?;
-
-        let mut cache = self.csrf_cache.lock().await;
-        *cache = Some((token.clone(), Instant::now()));
-        Some(token)
     }
 
     async fn enrich_request(
@@ -361,10 +430,30 @@ impl DouyinClient {
         }
 
         log::info!(
-            "API request started: method={} url={} skip_sign={}",
+            "API request started: method={} url={} skip_sign={} cookie_present={} cookie_len={} sessionid_present={} csrf_cookie_present={}",
             method,
             url,
-            skip_sign
+            skip_sign,
+            headers
+                .get("Cookie")
+                .or_else(|| headers.get("cookie"))
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false),
+            headers
+                .get("Cookie")
+                .or_else(|| headers.get("cookie"))
+                .map(|value| value.len())
+                .unwrap_or(0),
+            headers
+                .get("Cookie")
+                .or_else(|| headers.get("cookie"))
+                .map(|value| value.contains("sessionid="))
+                .unwrap_or(false),
+            headers
+                .get("Cookie")
+                .or_else(|| headers.get("cookie"))
+                .map(|value| value.contains("passport_csrf_token="))
+                .unwrap_or(false)
         );
 
         // 打印关键参数用于调试
@@ -633,6 +722,12 @@ impl DouyinClient {
         let status_code = response["status_code"].as_i64().unwrap_or(-1);
         if status_code != 0 {
             let status_msg = response["status_msg"].as_str().unwrap_or("unknown error");
+            log::warn!(
+                "Douyin video detail rejected: status_code={} status_msg={} aweme_id={}",
+                status_code,
+                status_msg,
+                aweme_id
+            );
             return Err(anyhow!("API error: {}", status_msg));
         }
 
@@ -670,6 +765,12 @@ impl DouyinClient {
         let status_code = response["status_code"].as_i64().unwrap_or(-1);
         if status_code != 0 {
             let status_msg = response["status_msg"].as_str().unwrap_or("unknown error");
+            log::warn!(
+                "Douyin multi video detail rejected: status_code={} status_msg={} aweme_id={}",
+                status_code,
+                status_msg,
+                normalized_aweme_id
+            );
             return Err(anyhow!("API error: {}", status_msg));
         }
 
@@ -1901,6 +2002,11 @@ impl DouyinClient {
         let status_code = value["status_code"].as_i64().unwrap_or(0);
         if status_code != 0 {
             let status_msg = value["status_msg"].as_str().unwrap_or("unknown error");
+            log::warn!(
+                "Douyin API status rejected: status_code={} status_msg={}",
+                status_code,
+                status_msg
+            );
             return Err(anyhow!("API error: {} (code={})", status_msg, status_code));
         }
         Ok(())
@@ -2346,11 +2452,10 @@ impl DouyinClient {
         let mut params = HashMap::new();
         params.insert("aweme_id", aweme_id.trim().to_string());
         params.insert("item_type", "0".to_string());
-        params.insert("type", if liked { "1" } else { "0" }.to_string());
-        params.insert("action_type", if liked { "1" } else { "0" }.to_string());
+        params.insert("type", if liked { "0" } else { "1" }.to_string());
 
         self.request_relation_update(
-            "https://www.douyin.com/aweme/v1/web/commit/item/digg/",
+            "https://www-hj.douyin.com/aweme/v1/web/commit/item/digg/",
             params,
             "点赞",
         )
@@ -2365,10 +2470,10 @@ impl DouyinClient {
         let mut params = HashMap::new();
         params.insert("aweme_id", aweme_id.trim().to_string());
         params.insert("action", if collected { "1" } else { "0" }.to_string());
-        params.insert("type", if collected { "1" } else { "0" }.to_string());
+        params.insert("aweme_type", "0".to_string());
 
         self.request_relation_update(
-            "https://www.douyin.com/aweme/v1/web/aweme/collect/",
+            "https://www-hj.douyin.com/aweme/v1/web/aweme/collect/",
             params,
             "收藏",
         )
@@ -2390,30 +2495,75 @@ impl DouyinClient {
         }
 
         let mut query_params = crate::config::get_common_params();
+        query_params.insert("update_version_code".to_string(), "170400".to_string());
+        query_params.insert("version_code".to_string(), "170400".to_string());
+        query_params.insert("version_name".to_string(), "17.4.0".to_string());
+        query_params.insert("browser_name".to_string(), "Chrome".to_string());
+        query_params.insert("browser_version".to_string(), "148.0.0.0".to_string());
+        query_params.insert("engine_version".to_string(), "148.0.0.0".to_string());
+        query_params.insert("device_memory".to_string(), "16".to_string());
+        if action_name == "点赞" {
+            if let Some(uid) = self.relation_uid_hash() {
+                query_params.insert("uid".to_string(), uid);
+            }
+        }
         let mut headers = crate::config::get_common_headers(&self.config.cookie);
-        headers.extend(Self::ticket_guard_headers_from_cookie(&self.config.cookie));
-        headers.insert(
-            "Referer".to_string(),
-            format!(
-                "https://www.douyin.com/video/{}",
-                body_params.get("aweme_id").cloned().unwrap_or_default()
-            ),
-        );
+        let relation_path = url::Url::parse(url)
+            .map(|parsed| parsed.path().to_string())
+            .unwrap_or_default();
+        headers.extend(self.relation_ticket_guard_headers(&relation_path));
+        headers.insert("Referer".to_string(), "https://www.douyin.com/".to_string());
         headers.insert("Origin".to_string(), "https://www.douyin.com".to_string());
         headers.insert(
             "Content-Type".to_string(),
             "application/x-www-form-urlencoded; charset=UTF-8".to_string(),
         );
+        headers.insert(
+            "User-Agent".to_string(),
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36".to_string(),
+        );
+        headers.insert(
+            "sec-ch-ua".to_string(),
+            "\"Chromium\";v=\"148\", \"Google Chrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"".to_string(),
+        );
+        if let Some(dtrait) = self.relation_dtrait() {
+            headers.insert("x-tt-session-dtrait".to_string(), dtrait);
+        }
 
         self.enrich_request(&mut query_params, &mut headers).await;
-        if let Some(csrf_token) = self.get_csrf_token(&headers).await {
-            headers.insert("x-secsdk-csrf-token".to_string(), csrf_token);
-        } else {
-            log::warn!(
-                "Douyin {} relation update: csrf token unavailable",
-                action_name
-            );
-        }
+        query_params.insert("browser_name".to_string(), "Chrome".to_string());
+        query_params.insert("browser_version".to_string(), "148.0.0.0".to_string());
+        query_params.insert("engine_version".to_string(), "148.0.0.0".to_string());
+        query_params.insert("device_memory".to_string(), "16".to_string());
+        headers.insert("x-secsdk-csrf-token".to_string(), "DOWNGRADE".to_string());
+        let mut query_keys = query_params.keys().cloned().collect::<Vec<_>>();
+        query_keys.sort();
+        let mut body_keys = body_params
+            .keys()
+            .map(|key| key.to_string())
+            .collect::<Vec<_>>();
+        body_keys.sort();
+        log::info!(
+            "Douyin {} relation update request: host={} path={} query_keys={} uid_present={} uid_prefix={} body_keys={} signer_present={} ticket_guard_cookie={} ticket_guard_header={} csrf_present={} dtrait_present={}",
+            action_name,
+            url::Url::parse(url)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(str::to_string))
+                .unwrap_or_default(),
+            relation_path,
+            query_keys.join(","),
+            query_params.contains_key("uid"),
+            query_params
+                .get("uid")
+                .map(|value| value.chars().take(8).collect::<String>())
+                .unwrap_or_default(),
+            body_keys.join(","),
+            self.config.relation_signer.is_some(),
+            self.config.cookie.contains("bd_ticket_guard_client_data"),
+            headers.contains_key("bd-ticket-guard-client-data"),
+            headers.contains_key("x-secsdk-csrf-token"),
+            headers.contains_key("x-tt-session-dtrait"),
+        );
         let params_str = serde_urlencoded::to_string(&query_params)?;
         let user_agent = headers
             .get("User-Agent")
@@ -2472,6 +2622,15 @@ impl DouyinClient {
         }
 
         let response = response.json::<serde_json::Value>().await?;
+        log::info!(
+            "Douyin {} relation update response: status_code={} status_msg={}",
+            action_name,
+            response["status_code"].as_i64().unwrap_or(0),
+            response["status_msg"]
+                .as_str()
+                .or_else(|| response["message"].as_str())
+                .unwrap_or("")
+        );
 
         let status_code = response["status_code"].as_i64().unwrap_or(0);
         if status_code != 0 {
@@ -2516,18 +2675,91 @@ impl DouyinClient {
                 expires_at: None,
                 message: "Cookie 有效".to_string(),
             }),
-            Err(e) => Ok(CookieStatus {
-                valid: false,
-                user_name: None,
-                user_id: None,
-                expires_at: None,
-                message: if looks_like_logged_out_error(&e.to_string()) {
-                    "用户未登录，请在设置中重新登录并刷新 Cookie".to_string()
-                } else {
-                    format!("Cookie 无效: {}", e)
-                },
-            }),
+            Err(e) => {
+                let cookies = crate::cookie::parse_cookie_string(&self.config.cookie);
+                if crate::cookie::has_douyin_login_cookie(&cookies) {
+                    match self.check_passport_account_expired().await {
+                        Ok(Some(message)) => {
+                            log::warn!("Douyin passport reports saved cookie expired: {}", message);
+                            return Ok(CookieStatus {
+                                valid: false,
+                                user_name: None,
+                                user_id: None,
+                                expires_at: None,
+                                message: format!("Cookie 会话已过期，请重新登录: {}", message),
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            log::warn!("Douyin passport account check failed: {}", error);
+                        }
+                    }
+                    log::warn!(
+                        "Douyin profile cookie check failed, but login cookies are present: {}",
+                        e
+                    );
+                    return Ok(CookieStatus {
+                        valid: false,
+                        user_name: None,
+                        user_id: None,
+                        expires_at: None,
+                        message: format!("Cookie 已保存但登录态校验失败，请重新登录或完成验证: {}", e),
+                    });
+                }
+
+                Ok(CookieStatus {
+                    valid: false,
+                    user_name: None,
+                    user_id: None,
+                    expires_at: None,
+                    message: if looks_like_logged_out_error(&e.to_string()) {
+                        "用户未登录，请在设置中重新登录并刷新 Cookie".to_string()
+                    } else {
+                        format!("Cookie 无效: {}", e)
+                    },
+                })
+            }
         }
+    }
+
+    async fn check_passport_account_expired(&self) -> Result<Option<String>> {
+        let mut headers = crate::config::get_common_headers(&self.config.cookie);
+        headers.insert("Referer".to_string(), "https://www.douyin.com/".to_string());
+
+        let mut req = self
+            .client
+            .get("https://www.douyin.com/passport/web/account/info/");
+        for (key, value) in &headers {
+            req = req.header(key, value);
+        }
+
+        let response = req.send().await?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let json = response.json::<serde_json::Value>().await?;
+        let message = json["message"].as_str().unwrap_or_default();
+        let error_code = json["data"]["error_code"].as_i64().unwrap_or(0);
+        let description = json["data"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if message == "error"
+            && error_code == 1
+            && (description.contains("会话过期")
+                || description.contains("重新登录")
+                || description.contains("登录"))
+        {
+            return Ok(Some(if description.is_empty() {
+                "会话过期".to_string()
+            } else {
+                description
+            }));
+        }
+
+        Ok(None)
     }
 
     /// 获取当前用户信息 (需要登录)

@@ -75,7 +75,9 @@ function emitCookieInvalidIfNeeded(payload: unknown) {
   if (!payload || typeof payload !== "object") return;
   const data = payload as Record<string, unknown>;
   if (data.security_blocked) return;
+  if (data.need_verify) return;
   const message = String(data.message || "Cookie 已失效，请重新登录").trim();
+  if (isRelationSecurityMessage(message)) return;
   const failedWithLoginMessage = data.success === false && isCookieInvalidMessage(message);
   if (!data.need_login && !failedWithLoginMessage) return;
 
@@ -91,6 +93,10 @@ function emitCookieInvalidFromError(error: unknown) {
 
 function isCookieInvalidMessage(message: string) {
   return /用户未登录|未登录|请先登录|请先设置\s*Cookie|登录态|重新登录|not login|not logged in|login required|session expired/i.test(message);
+}
+
+function isRelationSecurityMessage(message: string) {
+  return /RELATION_SECURITY_GATEWAY|安全校验拒绝|动作接口未接受当前网页登录凭据|当前 Cookie 仍会保留/i.test(message);
 }
 
 export function mediaProxyUrl(url: string | null | undefined, mediaType = "image"): string {
