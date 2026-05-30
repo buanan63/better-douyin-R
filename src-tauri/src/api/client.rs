@@ -241,6 +241,10 @@ impl DouyinClient {
         }
     }
 
+    fn has_relation_dtrait(&self) -> bool {
+        self.relation_dtrait().is_some()
+    }
+
     fn generate_ms_token() -> String {
         rand::thread_rng()
             .sample_iter(&Alphanumeric)
@@ -2492,6 +2496,11 @@ impl DouyinClient {
             .unwrap_or(true)
         {
             return Err(anyhow!("作品ID不能为空"));
+        }
+        if action_name == "点赞" && !self.has_relation_dtrait() {
+            return Err(anyhow!(
+                "RELATION_SECURITY_GATEWAY: 点赞安全参数不完整，请在设置中重新登录，等待登录窗口自动关闭后再试。"
+            ));
         }
 
         let mut query_params = crate::config::get_common_params();
