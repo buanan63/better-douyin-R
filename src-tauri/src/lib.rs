@@ -771,7 +771,7 @@ async fn cookie_browser_login(
                                 })
                         })
                         .collect();
-                    let relation_signer = extract_relation_signer_cookie(&cookies);
+                    let mut relation_signer = extract_relation_signer_cookie(&cookies);
                     let public_cookies = strip_internal_login_cookies(&cookies);
                     let cookie_string = serialize_cookie_string(&public_cookies);
                     log::info!(
@@ -834,6 +834,12 @@ async fn cookie_browser_login(
                             current_user.nickname
                         );
                         let mut next_config = config_state.lock().await.clone();
+                        if current_user.uid.trim().is_empty() == false {
+                            let signer = relation_signer.get_or_insert_with(Default::default);
+                            if signer.uid.trim().is_empty() {
+                                signer.uid = current_user.uid.clone();
+                            }
+                        }
                         next_config.cookie = cookie_string.clone();
                         next_config.relation_signer = relation_signer;
                         if let Err(error) = next_config.save() {
