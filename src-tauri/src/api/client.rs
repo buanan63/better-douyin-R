@@ -96,9 +96,9 @@ impl DouyinClient {
         let cookie_dict = Self::cookies_to_dict(cookie_str);
         let mut headers = HashMap::new();
 
-        let raw_client_data = cookie_dict
-            .get("bd_ticket_guard_client_data")
-            .or_else(|| cookie_dict.get("bd_ticket_guard_client_data_v2"));
+        let raw_client_data_v2 = cookie_dict.get("bd_ticket_guard_client_data_v2");
+        let raw_client_data = raw_client_data_v2
+            .or_else(|| cookie_dict.get("bd_ticket_guard_client_data"));
         let Some(raw_client_data) = raw_client_data else {
             return headers;
         };
@@ -106,6 +106,9 @@ impl DouyinClient {
         let decoded = urlencoding::decode(raw_client_data)
             .map(|value| value.into_owned())
             .unwrap_or_else(|_| raw_client_data.clone());
+        if raw_client_data_v2.is_some() {
+            headers.insert("bd-ticket-guard-client-data".to_string(), decoded.clone());
+        }
         let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(decoded.as_bytes()) else {
             return headers;
         };
@@ -137,7 +140,7 @@ impl DouyinClient {
 
             headers
                 .entry("bd-ticket-guard-web-sign-type".to_string())
-                .or_insert_with(|| "0".to_string());
+                .or_insert_with(|| if raw_client_data_v2.is_some() { "1" } else { "0" }.to_string());
         }
 
         headers
