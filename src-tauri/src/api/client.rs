@@ -1098,11 +1098,6 @@ impl DouyinClient {
             .any(Self::json_boolish)
     }
 
-    fn json_boolish_any_optional(data: &serde_json::Value, keys: &[&str]) -> Option<bool> {
-        keys.iter()
-            .find_map(|key| data.get(*key).map(Self::json_boolish))
-    }
-
     fn json_boolish(value: &serde_json::Value) -> bool {
         if let Some(value) = value.as_bool() {
             return value;
@@ -2467,27 +2462,16 @@ impl DouyinClient {
         let mut params = HashMap::new();
         params.insert("aweme_id", aweme_id.trim().to_string());
         params.insert("item_type", "0".to_string());
-        params.insert("type", if liked { "0" } else { "1" }.to_string());
+        // Douyin web uses type=1 for digg and type=0 for cancel. The response
+        // field `is_digg` is not reliable for confirming persistence.
+        params.insert("type", if liked { "1" } else { "0" }.to_string());
 
-        let response = self
-            .request_relation_update(
-                "https://www-hj.douyin.com/aweme/v1/web/commit/item/digg/",
-                params,
-                "点赞",
-            )
-            .await?;
-
-        if let Some(actual) = Self::json_boolish_any_optional(&response, &["is_digg"]) {
-            if actual != liked {
-                return Err(anyhow!(
-                    "点赞状态未生效: 期望{}，实际{}",
-                    if liked { "已点赞" } else { "未点赞" },
-                    if actual { "已点赞" } else { "未点赞" }
-                ));
-            }
-        }
-
-        Ok(response)
+        self.request_relation_update(
+            "https://www-hj.douyin.com/aweme/v1/web/commit/item/digg/",
+            params,
+            "点赞",
+        )
+        .await
     }
 
     pub async fn set_video_collected(
