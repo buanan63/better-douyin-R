@@ -141,6 +141,13 @@ function releaseMediaElement(node: HTMLMediaElement | null | undefined) {
   }
 }
 
+function releaseScopedMediaElements(reference: HTMLElement | null | undefined) {
+  if (!reference) return;
+  for (const node of Array.from(reference.querySelectorAll<HTMLMediaElement>("video, audio"))) {
+    releaseMediaElement(node);
+  }
+}
+
 function applyPlaybackRateToNode(node: HTMLMediaElement | null, rate: number) {
   if (!node) return;
   const safeRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
@@ -229,8 +236,12 @@ export function FullscreenPlayer({
   const pendingQualitySeekRef = useRef<number | null>(null);
   const preloadedMediaRef = useRef(new Map<string, boolean>());
   const preloadedNodesRef = useRef<Array<HTMLImageElement | HTMLVideoElement>>([]);
+  const wasOpenRef = useRef(open);
 
-  const rawCurrentVideo = videos[currentIndex] || null;
+  const safeInitialIndexForOpen = Math.min(Math.max(initialIndex, 0), Math.max(videos.length - 1, 0));
+  const isOpeningRender = open && !wasOpenRef.current;
+  const activeCurrentIndex = isOpeningRender ? safeInitialIndexForOpen : currentIndex;
+  const rawCurrentVideo = videos[activeCurrentIndex] || null;
   const currentVideo = rawCurrentVideo?.aweme_id
     ? videoOverrides[rawCurrentVideo.aweme_id] || rawCurrentVideo
     : rawCurrentVideo;
@@ -238,13 +249,21 @@ export function FullscreenPlayer({
     () => (currentVideo ? collectVideoMedia(currentVideo) : []),
     [currentVideo]
   );
-  const currentMedia = mediaItems[mediaIndex] || mediaItems[0] || null;
+  const safeInitialMediaIndexForOpen = Math.min(
+    Math.max(initialMediaIndex, 0),
+    Math.max(mediaItems.length - 1, 0)
+  );
+  const activeMediaIndex = isOpeningRender ? safeInitialMediaIndexForOpen : mediaIndex;
+  const currentMedia = mediaItems[activeMediaIndex] || mediaItems[0] || null;
   const qualityOptions = useMemo(
     () => currentMedia?.type === "video" ? collectVideoQualityOptions(currentVideo, currentMedia.url) : [],
     [currentMedia?.type, currentMedia?.url, currentVideo]
   );
   const selectedQualityOption = qualityOptions.find((option) => option.key === selectedQualityKey);
-  const activeQualityOption = selectedQualityOption || qualityOptions[0] || null;
+  const activeQualityOption =
+    selectedQualityKey === "auto" || selectedQualityOption?.isAuto
+      ? null
+      : selectedQualityOption || null;
   const currentPlaybackUrl =
     currentMedia && currentMedia.type === "video" && activeQualityOption
       ? activeQualityOption.url
@@ -256,7 +275,7 @@ export function FullscreenPlayer({
     ? playerMediaProxyUrl(currentMedia.poster, "image")
     : "";
   const mediaKey = currentMedia
-    ? `${currentVideo?.aweme_id || "video"}-${mediaIndex}-${currentMedia.type}-${currentMedia.url}-${reloadKey}`
+    ? `${currentVideo?.aweme_id || "video"}-${activeMediaIndex}-${currentMedia.type}-${currentMedia.url}-${reloadKey}`
     : "empty";
   const progressPct = duration > 0 ? Math.min(100, Math.max(0, (currentTime / duration) * 100)) : 0;
   const hasMultipleMedia = mediaItems.length > 1;
@@ -433,9 +452,12 @@ export function FullscreenPlayer({
   }, [patchCurrentVideoRelation]);
 
   useEffect(() => {
-    if (!open || !currentVideo?.aweme_id) return;
-    void refreshCurrentRelationState(currentVideo.aweme_id);
-  }, [currentVideo?.aweme_id, open, refreshCurrentRelationState]);
+    if (!open || loadState !== "ready" || !currentVideo?.aweme_id) return;
+    const timer = window.setTimeout(() => {
+      void refreshCurrentRelationState(currentVideo.aweme_id);
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [currentVideo?.aweme_id, loadState, open, refreshCurrentRelationState]);
 
   const toggleLike = useCallback(async () => {
     const awemeId = currentVideo?.aweme_id;
@@ -1201,17 +1223,16 @@ export function FullscreenPlayer({
     }, PLAYER_VIDEO_REBUFFER_STATUS_DELAY_MS);
   }, []);
 
-  const preloadMediaItem = useCallback((media: VideoMediaItem | null | undefined, _full = false) => {
+  const preloadMediaItem = useCallback((media: VideoMediaItem | null | undefined, full = false) => {
     if (!media) return;
-    if (media.type !== "image") return;
 
     const proxiedUrl = mediaProxyUrl(media.url, getMediaProxyType(media));
     const key = `${media.type}::${proxiedUrl}`;
     if (!proxiedUrl) return;
 
     const existingFullPreload = preloadedMediaRef.current.get(key);
-    if (existingFullPreload || (!_full && preloadedMediaRef.current.has(key))) return;
-    preloadedMediaRef.current.set(key, _full);
+    if (existingFullPreload || (!full && preloadedMediaRef.current.has(key))) return;
+    preloadedMediaRef.current.set(key, full);
 
     if (media.type === "image") {
       const image = new Image();
@@ -1221,7 +1242,7 @@ export function FullscreenPlayer({
       preloadedNodesRef.current.push(image);
     } else {
       const video = document.createElement("video");
-      video.preload = "metadata";
+      video.preload = full ? "auto" : "metadata";
       video.muted = true;
       video.playsInline = true;
       video.src = proxiedUrl;
@@ -1257,6 +1278,31 @@ export function FullscreenPlayer({
     const firstMedia = collectVideoMedia(video)[0];
     preloadMediaItem(firstMedia, full);
   }, [preloadMediaItem, videos]);
+
+  const releasePlayerMediaResources = useCallback(() => {
+    desiredPlayingRef.current = false;
+    playingRef.current = false;
+    mediaSwitchingRef.current = false;
+    qualitySwitchingRef.current = false;
+    clearLoadTimers();
+    stopVideoProgressLoop();
+    releaseMediaElement(videoRef.current);
+    releaseScopedMediaElements(playerRootRef.current);
+    releaseBgm();
+    releasePreloadedMedia();
+  }, [clearLoadTimers, releaseBgm, releasePreloadedMedia, stopVideoProgressLoop]);
+
+  const closePlayer = useCallback(() => {
+    wasOpenRef.current = false;
+    releasePlayerMediaResources();
+    setPlaying(false);
+    setShowLoadStatus(false);
+    onClose();
+  }, [onClose, releasePlayerMediaResources]);
+
+  useEffect(() => {
+    wasOpenRef.current = open;
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -1309,23 +1355,16 @@ export function FullscreenPlayer({
       releaseBgm();
       releasePreloadedMedia();
       releaseMediaElement(videoRef.current);
+      releaseScopedMediaElements(playerRootRef.current);
     };
   }, [clearLoadTimers, releaseBgm, releasePreloadedMedia, stopVideoProgressLoop]);
 
   useEffect(() => {
     if (open) return;
-    desiredPlayingRef.current = false;
-    playingRef.current = false;
-    mediaSwitchingRef.current = false;
-    qualitySwitchingRef.current = false;
     setPlaying(false);
     setShowLoadStatus(false);
-    clearLoadTimers();
-    stopVideoProgressLoop();
-    releaseMediaElement(videoRef.current || getDocumentVideoNode(playerRootRef.current));
-    releaseBgm();
-    releasePreloadedMedia();
-  }, [clearLoadTimers, open, releaseBgm, releasePreloadedMedia, stopVideoProgressLoop]);
+    releasePlayerMediaResources();
+  }, [open, releasePlayerMediaResources]);
 
   useEffect(() => {
     if (!open) return;
@@ -1359,7 +1398,7 @@ export function FullscreenPlayer({
       return;
     }
     if (qualityOptions.some((option) => option.key === selectedQualityKey)) return;
-    setSelectedQualityKey(qualityOptions[0].key);
+    setSelectedQualityKey("auto");
   }, [qualityOptions, selectedQualityKey]);
 
   useEffect(() => {
@@ -1409,12 +1448,6 @@ export function FullscreenPlayer({
       setShowLoadStatus(true);
     });
   }, [currentVideo, mediaItems.length, open, refreshCurrentVideoDetail]);
-
-  useEffect(() => {
-    if (!open || !currentVideo || currentMedia?.type !== "video") return;
-    if (qualityOptions.length > 1) return;
-    void refreshCurrentVideoDetail();
-  }, [currentMedia?.type, currentVideo, open, qualityOptions.length, refreshCurrentVideoDetail]);
 
   useEffect(() => {
     if (!open || !onLoadMore || videos.length === 0) return;
@@ -1585,7 +1618,7 @@ export function FullscreenPlayer({
       let handled = true;
 
       if (key === "Escape") {
-        onClose();
+        closePlayer();
       } else if (isEditableTarget) {
         handled = false;
       } else if (key === "ArrowUp" || lowerKey === "k") {
@@ -1609,7 +1642,7 @@ export function FullscreenPlayer({
     };
     window.addEventListener("keydown", handleKey, true);
     return () => window.removeEventListener("keydown", handleKey, true);
-  }, [open, onClose, playNextMedia, playNextVideo, playPrevMedia, playPrevVideo, togglePlay]);
+  }, [closePlayer, open, playNextMedia, playNextVideo, playPrevMedia, playPrevVideo, togglePlay]);
 
   const handleWheel = useCallback((event: ReactWheelEvent) => {
     event.preventDefault();
@@ -1690,11 +1723,11 @@ export function FullscreenPlayer({
             className="absolute inset-x-0 top-0 z-30 flex items-center bg-gradient-to-b from-black/70 to-transparent px-5 py-4"
             onClick={(event) => event.stopPropagation()}
           >
-            <button
-              onClick={onClose}
-              className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-md transition-[background-color,transform] hover:bg-white/20 active:scale-[0.96]"
-              aria-label="关闭播放器"
-            >
+	            <button
+	              onClick={closePlayer}
+	              className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-md transition-[background-color,transform] hover:bg-white/20 active:scale-[0.96]"
+	              aria-label="关闭播放器"
+	            >
               <X className="h-5 w-5" />
             </button>
           </div>
@@ -1931,11 +1964,12 @@ export function FullscreenPlayer({
                 disabled={!canOpenAuthor}
                 title={canOpenAuthor ? "进入作者主页" : "作者信息不可用"}
                 aria-label={canOpenAuthor ? `进入 ${authorName} 主页` : "作者信息不可用"}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  if (!currentVideo || !canOpenAuthor) return;
-                  onAuthor?.(currentVideo);
-                }}
+	                    onClick={(event) => {
+	                      event.stopPropagation();
+	                      if (!currentVideo || !canOpenAuthor) return;
+	                      releasePlayerMediaResources();
+	                      onAuthor?.(currentVideo);
+	                    }}
               >
                 <div className="h-7 w-7 shrink-0 overflow-hidden rounded-full border-2 border-white/30 bg-white/10">
                   {authorAvatar ? (
@@ -2271,10 +2305,11 @@ export function FullscreenPlayer({
                 {onShowDetail && (
                   <PlayerIconButton
                     label="查看详情"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onShowDetail(currentVideo);
-                    }}
+	                    onClick={(event) => {
+	                      event.stopPropagation();
+	                      releasePlayerMediaResources();
+	                      onShowDetail(currentVideo);
+	                    }}
                   >
                     <Info className="h-4 w-4" />
                   </PlayerIconButton>
@@ -2283,16 +2318,16 @@ export function FullscreenPlayer({
             </div>
 
             <div className="mt-0.5">
-              <ProgressBar
-                duration={duration}
-                currentTime={currentTime}
-                progressPct={progressPct}
-                mediaItems={mediaItems}
-                mediaIndex={mediaIndex}
-                previewSrc={currentMedia && isVideoLikeMedia(currentMedia) ? currentMediaSrc : ""}
-                onSeek={handleSeek}
-                onSelectMedia={switchToMedia}
-              />
+	              <ProgressBar
+	                duration={duration}
+	                currentTime={currentTime}
+	                progressPct={progressPct}
+	                mediaItems={mediaItems}
+	                mediaIndex={activeMediaIndex}
+	                previewSrc={currentMedia && isVideoLikeMedia(currentMedia) ? currentMediaSrc : ""}
+	                onSeek={handleSeek}
+	                onSelectMedia={switchToMedia}
+	              />
 
               <p className="mt-1 line-clamp-2 text-[0.82rem] leading-[1.32] text-white/90 drop-shadow-md">
                 {currentVideo.desc || "无描述"}
@@ -2553,7 +2588,7 @@ function ProgressBar({
           )}
           style={{ left: `calc(${progressPct}% - 6px)` }}
         />
-        {duration > 0 && previewSrc && (
+        {duration > 0 && previewSrc && hoverPreview.visible && (
           <div
             className={cn(
               "pointer-events-none absolute bottom-full z-50 mb-3 transition-[opacity,transform] duration-150",
@@ -2721,20 +2756,21 @@ function ProgressFramePreview({
 
     playFallbackTimer = window.setTimeout(triggerMutedDecode, 180);
 
-    return () => {
-      cancelled = true;
-      if (playFallbackTimer !== null) {
-        window.clearTimeout(playFallbackTimer);
-      }
+	    return () => {
+	      cancelled = true;
+	      if (playFallbackTimer !== null) {
+	        window.clearTimeout(playFallbackTimer);
+	      }
       if (animationFrame !== null) {
         window.cancelAnimationFrame(animationFrame);
       }
       node.removeEventListener("loadedmetadata", seekPreview);
-      node.removeEventListener("loadeddata", requestDraw);
-      node.removeEventListener("canplay", requestDraw);
-      node.removeEventListener("seeked", requestDraw);
-    };
-  }, [src, time]);
+	      node.removeEventListener("loadeddata", requestDraw);
+	      node.removeEventListener("canplay", requestDraw);
+	      node.removeEventListener("seeked", requestDraw);
+	      releaseMediaElement(node);
+	    };
+	  }, [src, time]);
 
   if (!src) {
     return (
@@ -2755,10 +2791,10 @@ function ProgressFramePreview({
           正在预览
         </div>
       )}
-      <video
-        ref={videoRef}
-        src={src}
-        preload="auto"
+	      <video
+	        ref={videoRef}
+	        src={src}
+	        preload="metadata"
         muted
         playsInline
         crossOrigin="anonymous"
