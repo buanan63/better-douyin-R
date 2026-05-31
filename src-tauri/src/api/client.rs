@@ -1064,8 +1064,15 @@ impl DouyinClient {
         // 判断媒体类型
         let raw_media_type = data["raw_media_type"].as_i64().map(|v| v as i32);
         let is_liked = Self::json_boolish_any(data, &["user_digged", "is_liked", "digg_status"]);
-        let is_collected =
-            Self::json_boolish_any(data, &["is_collected", "is_collect", "collect_status"]);
+        let is_collected = Self::json_boolish_any(
+            data,
+            &[
+                "is_collected",
+                "is_collect",
+                "collect_status",
+                "collect_stat",
+            ],
+        );
 
         Ok(VideoInfo {
             aweme_id,
@@ -1573,7 +1580,12 @@ impl DouyinClient {
                 || default_liked,
             is_collected: Self::json_boolish_any(
                 post,
-                &["is_collected", "is_collect", "collect_status"],
+                &[
+                    "is_collected",
+                    "is_collect",
+                    "collect_status",
+                    "collect_stat",
+                ],
             ) || default_collected,
             statistics: Statistics {
                 digg_count: post["statistics"]["digg_count"].as_i64().unwrap_or(0),
