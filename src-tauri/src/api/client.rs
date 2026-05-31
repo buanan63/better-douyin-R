@@ -2542,6 +2542,8 @@ impl DouyinClient {
         headers.extend(self.relation_ticket_guard_headers(&relation_path));
         headers.insert("Referer".to_string(), "https://www.douyin.com/".to_string());
         headers.insert("Origin".to_string(), "https://www.douyin.com".to_string());
+        // www.douyin.com → www-hj.douyin.com 是同站跨源，浏览器发送 same-site
+        headers.insert("sec-fetch-site".to_string(), "same-site".to_string());
         headers.insert(
             "Content-Type".to_string(),
             "application/x-www-form-urlencoded; charset=UTF-8".to_string(),
@@ -2652,13 +2654,14 @@ impl DouyinClient {
 
         let response = response.json::<serde_json::Value>().await?;
         log::info!(
-            "Douyin {} relation update response: status_code={} status_msg={}",
+            "Douyin {} relation update response: status_code={} status_msg={} full_response={}",
             action_name,
             response["status_code"].as_i64().unwrap_or(0),
             response["status_msg"]
                 .as_str()
                 .or_else(|| response["message"].as_str())
-                .unwrap_or("")
+                .unwrap_or(""),
+            response
         );
 
         let status_code = response["status_code"].as_i64().unwrap_or(0);
