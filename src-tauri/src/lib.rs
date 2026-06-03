@@ -58,6 +58,7 @@ const DOUYIN_COOKIE_CLEAR_DOMAINS: &[&str] = &[
 ];
 
 const RELATION_SIGNER_COOKIE_NAME: &str = "dy_relation_signer";
+const IM_FRIEND_IDS_COOKIE_PREFIX: &str = "dy_im_sec_user_ids";
 
 fn clear_douyin_login_cookies(window: &tauri::WebviewWindow) {
     let mut names = DOUYIN_LOGIN_COOKIE_NAMES
@@ -142,8 +143,27 @@ fn strip_internal_login_cookies(
 ) -> Vec<tauri::webview::Cookie<'static>> {
     cookies
         .iter()
-        .filter(|cookie| cookie.name() != RELATION_SIGNER_COOKIE_NAME)
+        .filter(|cookie| {
+            cookie.name() != RELATION_SIGNER_COOKIE_NAME
+                && !cookie.name().starts_with(IM_FRIEND_IDS_COOKIE_PREFIX)
+        })
         .cloned()
+        .collect()
+}
+
+fn sanitize_sec_user_ids(ids: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    ids.into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| {
+            (value.starts_with("MS4wLjAB") || value.starts_with("MS4w.LjAB"))
+                && value.len() <= 180
+                && value
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
+                && seen.insert(value.clone())
+        })
+        .take(500)
         .collect()
 }
 
@@ -989,8 +1009,82 @@ async fn cookie_browser_login(
                                 None
                             };
                         }
+
                         next_config.cookie = cookie_string.clone();
                         next_config.relation_signer = relation_signer;
+                        emit_cookie_login_status(
+                            &app,
+                            serde_json::json!({
+                                "event": "pending",
+                                "message": "登录已确认，正在自动获取好友列表"
+                            }),
+                        )
+                        .await;
+                        match DouyinClient::new(next_config.clone()) {
+                            Ok(login_client) => {
+                                match login_client
+                                    .get_im_spotlight_relation_sec_user_ids(
+                                        500,
+                                        next_config.im_friend_include_all_users,
+                                    )
+                                    .await
+                                {
+                                    Ok(fetched_ids) => {
+                                        log::info!(
+                                            "cookie browser IM spotlight mutual friend ids fetched after login: count={}",
+                                            fetched_ids.len()
+                                        );
+                                        let fetched_ids = sanitize_sec_user_ids(fetched_ids);
+                                        if !fetched_ids.is_empty() {
+                                            next_config.im_friend_sec_user_ids = fetched_ids;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        log::warn!(
+                                            "failed to fetch IM spotlight relation ids after login: {}",
+                                            error
+                                        );
+                                        match login_client
+                                            .get_following_sec_user_ids(
+                                                &current_user.uid,
+                                                &current_user.sec_uid,
+                                                500,
+                                                !next_config.im_friend_include_all_users,
+                                            )
+                                            .await
+                                        {
+                                            Ok(fetched_ids) => {
+                                                log::info!(
+                                                    "cookie browser fallback following ids fetched after login: count={}",
+                                                    fetched_ids.len()
+                                                );
+                                                let mut merged_friend_ids =
+                                                    next_config.im_friend_sec_user_ids.clone();
+                                                merged_friend_ids.extend(fetched_ids);
+                                                next_config.im_friend_sec_user_ids =
+                                                    sanitize_sec_user_ids(merged_friend_ids);
+                                            }
+                                            Err(fallback_error) => {
+                                                log::warn!(
+                                                    "failed to fetch fallback following ids after login: {}",
+                                                    fallback_error
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                log::warn!(
+                                    "failed to create login client for friend ids: {}",
+                                    error
+                                );
+                            }
+                        }
+                        log::info!(
+                            "cookie browser IM friend ids cached: count={}",
+                            next_config.im_friend_sec_user_ids.len()
+                        );
                         if let Err(error) = next_config.save() {
                             emit_cookie_login_status(
                                 &app,
@@ -1024,11 +1118,12 @@ async fn cookie_browser_login(
                             serde_json::json!({
                                 "event": "success",
                                 "message": if relation_signer_ready(&next_config.relation_signer) {
-                                    format!("Cookie 获取成功！已登录为 {}", current_user.nickname)
+                                    format!("Cookie 获取成功！已登录为 {}，已采集 {} 个好友ID", current_user.nickname, next_config.im_friend_sec_user_ids.len())
                                 } else {
-                                    format!("Cookie 获取成功！已登录为 {}，点赞安全参数未采集完整", current_user.nickname)
+                                    format!("Cookie 获取成功！已登录为 {}，已采集 {} 个好友ID，点赞安全参数未采集完整", current_user.nickname, next_config.im_friend_sec_user_ids.len())
                                 },
-                                "cookie_set": true
+                                "cookie_set": true,
+                                "friend_sec_user_id_count": next_config.im_friend_sec_user_ids.len()
                             }),
                         )
                         .await;
@@ -1704,6 +1799,272 @@ async fn get_liked_authors(
         "success": true,
         "data": authors,
         "count": count
+    }))
+}
+
+/// 获取 IM 好友资料与在线状态
+#[tauri::command]
+async fn get_friend_online_status(
+    state: State<'_, AppState>,
+    sec_user_ids: Vec<String>,
+    conv_ids: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    let mut seen = HashSet::new();
+    let mut sec_user_ids = sec_user_ids
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+        .collect::<Vec<_>>();
+    let has_provided_sec_user_ids = !sec_user_ids.is_empty();
+    sec_user_ids = sanitize_sec_user_ids(sec_user_ids);
+
+    if sec_user_ids.is_empty() {
+        sec_user_ids = state
+            .config
+            .lock()
+            .await
+            .im_friend_sec_user_ids
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+            .collect::<Vec<_>>();
+    }
+
+    if has_provided_sec_user_ids && !sec_user_ids.is_empty() {
+        let mut config = state.config.lock().await;
+        let mut merged = config.im_friend_sec_user_ids.clone();
+        merged.extend(sec_user_ids.clone());
+        let merged = sanitize_sec_user_ids(merged);
+        if merged.len() != config.im_friend_sec_user_ids.len() {
+            config.im_friend_sec_user_ids = merged;
+            if let Err(error) = config.save() {
+                log::warn!("failed to save provided IM friend ids cache: {}", error);
+            }
+        }
+    }
+
+    let client = match get_client(&state).await {
+        Ok(client) => client,
+        Err(_) => {
+            return Ok(cookie_required_response());
+        }
+    };
+
+    let mut auto_fetch_failed = None;
+    let mut auto_fetch_succeeded = false;
+    let include_all_users = state.config.lock().await.im_friend_include_all_users;
+    match client
+        .get_im_spotlight_relation_sec_user_ids(500, include_all_users)
+        .await
+    {
+        Ok(fetched_ids) => {
+            log::info!(
+                "friend online auto IM spotlight ids fetched: include_all_users={} raw_count={}",
+                include_all_users,
+                fetched_ids.len()
+            );
+            auto_fetch_succeeded = true;
+            let fetched_ids = sanitize_sec_user_ids(fetched_ids);
+            sec_user_ids = fetched_ids.clone();
+
+            let mut config = state.config.lock().await;
+            if config.im_friend_sec_user_ids != sec_user_ids {
+                config.im_friend_sec_user_ids = sec_user_ids.clone();
+                if let Err(error) = config.save() {
+                    log::warn!("failed to save IM spotlight friend ids cache: {}", error);
+                }
+            }
+        }
+        Err(error) => {
+            log::warn!(
+                "friend online auto IM spotlight relation ids failed: {}",
+                error
+            );
+            auto_fetch_failed = Some(error);
+        }
+    }
+
+    if sec_user_ids.is_empty() && !auto_fetch_succeeded {
+        match client.get_current_user().await {
+            Ok(current_user) => {
+                let user_id = current_user.uid.trim().to_string();
+                let sec_uid = current_user.sec_uid.trim().to_string();
+                match client
+                    .get_following_sec_user_ids(&user_id, &sec_uid, 500, !include_all_users)
+                    .await
+                {
+                    Ok(fetched_ids) => {
+                        log::info!(
+                            "friend online auto following ids fetched: raw_count={}",
+                            fetched_ids.len()
+                        );
+                        sec_user_ids = sanitize_sec_user_ids(fetched_ids);
+                        if !sec_user_ids.is_empty() {
+                            let mut config = state.config.lock().await;
+                            let mut merged = config.im_friend_sec_user_ids.clone();
+                            merged.extend(sec_user_ids.clone());
+                            config.im_friend_sec_user_ids = sanitize_sec_user_ids(merged);
+                            if let Err(error) = config.save() {
+                                log::warn!("failed to save IM friend ids cache: {}", error);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let error = auto_fetch_failed.unwrap_or(error);
+                        return Ok(api_login_or_verify_error_response(
+                            &client,
+                            "自动获取 IM 好友关系失败",
+                            error,
+                            "https://www.douyin.com/",
+                        )
+                        .await);
+                    }
+                }
+            }
+            Err(error) => {
+                return Ok(api_login_or_verify_error_response(
+                    &client,
+                    "自动获取当前用户失败",
+                    error,
+                    "https://www.douyin.com/",
+                )
+                .await);
+            }
+        }
+    }
+
+    if sec_user_ids.is_empty() {
+        return Ok(serde_json::json!({
+            "success": false,
+            "message": "没有获取到 IM 好友关系；Cookie 可用，但 spotlight relation 和关注列表都没有返回可用 sec_user_id。"
+        }));
+    }
+
+    let conv_ids = conv_ids.unwrap_or_default();
+    let mut user_info_data = Vec::new();
+    let mut active_status_data = Vec::new();
+    let mut not_friend_data = Vec::new();
+    let mut active_status_sec_user_ids = HashSet::new();
+    let mut user_info_extra = serde_json::Value::Null;
+    let mut active_status_extra = serde_json::Value::Null;
+
+    for (index, chunk) in sec_user_ids.chunks(20).enumerate() {
+        let chunk_ids = chunk.to_vec();
+        log::info!(
+            "friend online IM batch request: batch={} size={} total={}",
+            index + 1,
+            chunk_ids.len(),
+            sec_user_ids.len()
+        );
+
+        let user_info = match client.get_im_user_info(&chunk_ids).await {
+            Ok(response) => response,
+            Err(error) => {
+                return Ok(api_login_or_verify_error_response(
+                    &client,
+                    "获取好友资料失败",
+                    error,
+                    "https://www.douyin.com/",
+                )
+                .await)
+            }
+        };
+        if user_info_extra.is_null() {
+            user_info_extra = user_info
+                .get("extra")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+        }
+        let user_info_count = user_info
+            .get("data")
+            .and_then(|value| value.as_array())
+            .map(|items| items.len())
+            .unwrap_or_default();
+        log::info!(
+            "friend online IM user info batch response: batch={} requested={} returned={}",
+            index + 1,
+            chunk_ids.len(),
+            user_info_count
+        );
+        if let Some(items) = user_info.get("data").and_then(|value| value.as_array()) {
+            user_info_data.extend(items.iter().cloned());
+        }
+
+        let active_status = match client
+            .get_im_user_active_status(&chunk_ids, &conv_ids)
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return Ok(api_login_or_verify_error_response(
+                    &client,
+                    "获取好友在线状态失败",
+                    error,
+                    "https://www.douyin.com/",
+                )
+                .await)
+            }
+        };
+        if active_status_extra.is_null() {
+            active_status_extra = active_status
+                .get("extra")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+        }
+        let active_status_count = active_status
+            .get("data")
+            .and_then(|value| value.as_array())
+            .map(|items| items.len())
+            .unwrap_or_default();
+        log::info!(
+            "friend online IM active status batch response: batch={} requested={} returned={}",
+            index + 1,
+            chunk_ids.len(),
+            active_status_count
+        );
+        if let Some(items) = active_status.get("data").and_then(|value| value.as_array()) {
+            for item in items {
+                if let Some(sec_uid) = item
+                    .get("sec_uid")
+                    .and_then(|value| value.as_str())
+                    .or_else(|| item.get("sec_user_id").and_then(|value| value.as_str()))
+                {
+                    active_status_sec_user_ids.insert(sec_uid.to_string());
+                }
+                active_status_data.push(item.clone());
+            }
+        }
+        if let Some(items) = active_status
+            .get("not_friend_data")
+            .and_then(|value| value.as_array())
+        {
+            not_friend_data.extend(items.iter().cloned());
+        }
+    }
+
+    sec_user_ids.retain(|id| active_status_sec_user_ids.contains(id));
+    user_info_data.retain(|item| {
+        item.get("sec_uid")
+            .and_then(|value| value.as_str())
+            .or_else(|| item.get("sec_user_id").and_then(|value| value.as_str()))
+            .map(|id| active_status_sec_user_ids.contains(id))
+            .unwrap_or(false)
+    });
+
+    Ok(serde_json::json!({
+        "success": true,
+        "sec_user_ids": sec_user_ids,
+        "user_info": {
+            "status_code": 0,
+            "data": user_info_data,
+            "extra": user_info_extra
+        },
+        "active_status": {
+            "status_code": 0,
+            "data": active_status_data,
+            "not_friend_data": not_friend_data,
+            "extra": active_status_extra
+        }
     }))
 }
 
@@ -3370,6 +3731,7 @@ pub fn run() {
             get_collected_mixes,
             get_mix_videos,
             get_liked_authors,
+            get_friend_online_status,
             get_recommended,
             get_comments,
             verify_cookie,

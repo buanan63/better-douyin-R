@@ -14,6 +14,7 @@ import type {
   CollectedVideosResponse,
   DownloadFilesResult,
   DownloadProgress,
+  FriendOnlineStatusResponse,
   HistoryItem,
   LikedAuthorsResponse,
   LikedVideosResponse,
@@ -244,6 +245,9 @@ export async function saveConfig(config: Partial<AppConfig>): Promise<{ success:
     save_metadata: config.save_metadata ?? current.save_metadata ?? true,
     proxy: config.proxy ?? current.proxy ?? null,
     cookie: config.cookie ?? "",
+    im_friend_sec_user_ids: config.im_friend_sec_user_ids ?? current.im_friend_sec_user_ids ?? [],
+    im_friend_include_all_users:
+      config.im_friend_include_all_users ?? current.im_friend_include_all_users ?? false,
     theme: config.theme ?? current.theme ?? "dark",
     language: config.language ?? current.language ?? "zh-CN",
   };
@@ -460,6 +464,18 @@ export async function getMixVideos(seriesId: string, cursor: number, count: numb
 
 export async function getComments(awemeId: string, count: number, cursor?: number): Promise<unknown> {
   return invoke("get_comments", { awemeId, count, cursor });
+}
+
+export async function getFriendOnlineStatus(
+  secUserIds: string[],
+  convIds: string[] = []
+): Promise<FriendOnlineStatusResponse> {
+  return invoke("get_friend_online_status", {
+    secUserIds,
+    sec_user_ids: secUserIds,
+    convIds,
+    conv_ids: convIds,
+  });
 }
 
 // Cookie

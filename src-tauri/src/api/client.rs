@@ -10,9 +10,9 @@ use regex::Regex;
 use reqwest::redirect::Policy;
 use serde::de::DeserializeOwned;
 use sha2::Sha256;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use super::types::*;
@@ -2333,6 +2333,415 @@ impl DouyinClient {
             "收藏",
         )
         .await
+    }
+
+    fn im_common_headers(&self, path: &str) -> HashMap<String, String> {
+        let mut headers = crate::config::get_common_headers(&self.config.cookie);
+        headers.extend(Self::ticket_guard_headers_from_cookie(&self.config.cookie));
+        headers.insert("Referer".to_string(), "https://www.douyin.com/".to_string());
+        headers.insert("Origin".to_string(), "https://www.douyin.com".to_string());
+        headers.insert("sec-fetch-site".to_string(), "same-site".to_string());
+        headers.insert(
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded; charset=UTF-8".to_string(),
+        );
+        headers.insert("x-secsdk-csrf-token".to_string(), "DOWNGRADE".to_string());
+        if let Some(dtrait) = self.relation_dtrait() {
+            headers.insert("x-tt-session-dtrait".to_string(), dtrait);
+        }
+        if path.contains("/im/") {
+            headers.insert(
+                "sec-ch-ua".to_string(),
+                "\"Chromium\";v=\"148\", \"Microsoft Edge\";v=\"148\", \"Not/A)Brand\";v=\"99\""
+                    .to_string(),
+            );
+            headers.insert(
+                "User-Agent".to_string(),
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0".to_string(),
+            );
+        }
+        headers
+    }
+
+    async fn request_im_post(
+        &self,
+        url: &str,
+        body_params: HashMap<&str, String>,
+    ) -> Result<serde_json::Value> {
+        let relation_path = url::Url::parse(url)
+            .map(|parsed| parsed.path().to_string())
+            .unwrap_or_default();
+        let mut query_params = crate::config::get_common_params();
+        query_params.insert("update_version_code".to_string(), "170400".to_string());
+        query_params.insert("version_code".to_string(), "170400".to_string());
+        query_params.insert("version_name".to_string(), "17.4.0".to_string());
+        query_params.insert("browser_version".to_string(), "148.0.0.0".to_string());
+        query_params.insert("engine_version".to_string(), "148.0.0.0".to_string());
+        query_params.insert("round_trip_time".to_string(), "0".to_string());
+
+        let mut headers = self.im_common_headers(&relation_path);
+        self.enrich_request(&mut query_params, &mut headers).await;
+
+        let params_str = serde_urlencoded::to_string(&query_params)?;
+        let user_agent = headers
+            .get("User-Agent")
+            .map(String::as_str)
+            .unwrap_or_else(|| get_user_agent());
+        query_params.insert(
+            "a_bogus".to_string(),
+            sign::sign_detail(&params_str, user_agent),
+        );
+
+        let mut body_keys = body_params
+            .keys()
+            .map(|key| key.to_string())
+            .collect::<Vec<_>>();
+        body_keys.sort();
+        log::info!(
+            "Douyin IM request: path={} body_keys={} sec_user_ids_len={}",
+            relation_path,
+            body_keys.join(","),
+            body_params
+                .get("sec_user_ids")
+                .map(|value| value.len())
+                .unwrap_or_default()
+        );
+
+        let mut req = self
+            .client
+            .post(url)
+            .query(&query_params)
+            .form(&body_params);
+        for (key, value) in &headers {
+            req = req.header(key, value);
+        }
+
+        let response = req
+            .send()
+            .await
+            .map_err(|error| anyhow!("HTTP request failed: {}", error))?;
+        if !response.status().is_success() {
+            return Err(anyhow!("HTTP error: {}", response.status()));
+        }
+
+        let response = response.json::<serde_json::Value>().await?;
+        let status_code = response["status_code"].as_i64().unwrap_or(0);
+        if status_code != 0 {
+            let status_msg = response["status_msg"]
+                .as_str()
+                .or_else(|| response["message"].as_str())
+                .unwrap_or("请求失败");
+            return Err(anyhow!("IM接口请求失败: {}", status_msg));
+        }
+
+        Ok(response)
+    }
+
+    async fn request_im_get(
+        &self,
+        url: &str,
+        endpoint_params: HashMap<&str, String>,
+    ) -> Result<serde_json::Value> {
+        let relation_path = url::Url::parse(url)
+            .map(|parsed| parsed.path().to_string())
+            .unwrap_or_default();
+        let mut query_params = crate::config::get_common_params();
+        query_params.insert("update_version_code".to_string(), "170400".to_string());
+        query_params.insert("version_code".to_string(), "170400".to_string());
+        query_params.insert("version_name".to_string(), "17.4.0".to_string());
+        query_params.insert("browser_version".to_string(), "148.0.0.0".to_string());
+        query_params.insert("engine_version".to_string(), "148.0.0.0".to_string());
+        query_params.insert("round_trip_time".to_string(), "0".to_string());
+        for (key, value) in endpoint_params {
+            query_params.insert(key.to_string(), value);
+        }
+
+        let mut headers = self.im_common_headers(&relation_path);
+        headers.remove("Content-Type");
+        self.enrich_request(&mut query_params, &mut headers).await;
+
+        let params_str = serde_urlencoded::to_string(&query_params)?;
+        let user_agent = headers
+            .get("User-Agent")
+            .map(String::as_str)
+            .unwrap_or_else(|| get_user_agent());
+        query_params.insert(
+            "a_bogus".to_string(),
+            sign::sign_detail(&params_str, user_agent),
+        );
+
+        log::info!("Douyin IM GET request: path={}", relation_path);
+
+        let mut req = self.client.get(url).query(&query_params);
+        for (key, value) in &headers {
+            req = req.header(key, value);
+        }
+
+        let response = req
+            .send()
+            .await
+            .map_err(|error| anyhow!("HTTP request failed: {}", error))?;
+        if !response.status().is_success() {
+            return Err(anyhow!("HTTP error: {}", response.status()));
+        }
+
+        let response = response.json::<serde_json::Value>().await?;
+        let status_code = response["status_code"].as_i64().unwrap_or(0);
+        if status_code != 0 {
+            let status_msg = response["status_msg"]
+                .as_str()
+                .or_else(|| response["message"].as_str())
+                .unwrap_or("请求失败");
+            return Err(anyhow!("IM接口请求失败: {}", status_msg));
+        }
+
+        Ok(response)
+    }
+
+    fn collect_spotlight_sec_user_ids(
+        response: &serde_json::Value,
+        include_all_users: bool,
+        ids: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        fn push_id(user: &serde_json::Value, ids: &mut Vec<String>, seen: &mut HashSet<String>) {
+            for key in ["sec_uid", "sec_user_id"] {
+                if let Some(id) = user.get(key).and_then(|value| value.as_str()) {
+                    let id = id.trim().to_string();
+                    if !id.is_empty() && seen.insert(id.clone()) {
+                        ids.push(id);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(items) = response["followings"].as_array() {
+            for item in items {
+                let is_mutual = item["follow_status"].as_i64().unwrap_or_default() > 0
+                    && item["follower_status"].as_i64().unwrap_or_default() > 0;
+                if include_all_users || is_mutual {
+                    push_id(item, ids, seen);
+                }
+            }
+        }
+
+        if let Some(items) = response["sorted_info"].as_array() {
+            for item in items {
+                if item["conv_type"].as_i64().unwrap_or_default() == 0 {
+                    push_id(item, ids, seen);
+                }
+            }
+        }
+
+        if include_all_users {
+            for key in [
+                "mix_recent_share_day_sort",
+                "mix_recent_share_users",
+                "single_recent_share_users",
+            ] {
+                if let Some(items) = response[key].as_array() {
+                    for item in items {
+                        push_id(item, ids, seen);
+                    }
+                }
+            }
+
+            if let Some(items) = response["recent_share_users"]["data"].as_array() {
+                for item in items {
+                    push_id(item, ids, seen);
+                }
+            }
+        }
+    }
+
+    pub async fn get_im_user_info(&self, sec_user_ids: &[String]) -> Result<serde_json::Value> {
+        let ids = sec_user_ids
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Err(anyhow!("好友ID不能为空"));
+        }
+
+        let mut body_params = HashMap::new();
+        body_params.insert("sec_user_ids", serde_json::to_string(&ids)?);
+
+        self.request_im_post(
+            "https://www-hj.douyin.com/aweme/v1/web/im/user/info/",
+            body_params,
+        )
+        .await
+    }
+
+    pub async fn get_im_user_active_status(
+        &self,
+        sec_user_ids: &[String],
+        conv_ids: &[String],
+    ) -> Result<serde_json::Value> {
+        let ids = sec_user_ids
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Err(anyhow!("好友ID不能为空"));
+        }
+        let conv_ids = conv_ids
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+
+        let mut body_params = HashMap::new();
+        body_params.insert("conv_ids", serde_json::to_string(&conv_ids)?);
+        body_params.insert("sec_user_ids", serde_json::to_string(&ids)?);
+        body_params.insert("source", "heartbeat".to_string());
+
+        self.request_im_post(
+            "https://www-hj.douyin.com/aweme/v1/web/im/user/active/status/",
+            body_params,
+        )
+        .await
+    }
+
+    pub async fn get_im_spotlight_relation_sec_user_ids(
+        &self,
+        limit: usize,
+        include_all_users: bool,
+    ) -> Result<Vec<String>> {
+        let mut ids = Vec::new();
+        let mut seen = HashSet::new();
+        let mut max_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .to_string();
+
+        let page_limit = 1;
+        for _ in 0..page_limit {
+            let mut params = HashMap::new();
+            params.insert("count", "100".to_string());
+            params.insert("source", "coldup".to_string());
+            params.insert("max_time", max_time.clone());
+            params.insert("min_time", "0".to_string());
+            params.insert("need_remove_share_panel", "true".to_string());
+            params.insert("need_sorted_info", "true".to_string());
+            params.insert("with_fstatus", "1".to_string());
+
+            let response = self
+                .request_im_get(
+                    "https://www-hj.douyin.com/aweme/v1/web/im/spotlight/relation/",
+                    params,
+                )
+                .await?;
+
+            Self::collect_spotlight_sec_user_ids(&response, include_all_users, &mut ids, &mut seen);
+            if ids.len() >= limit {
+                ids.truncate(limit);
+                return Ok(ids);
+            }
+
+            let has_more = response["has_more"]
+                .as_bool()
+                .or_else(|| response["has_more"].as_i64().map(|value| value == 1))
+                .unwrap_or(false);
+            let next_max_time = response["max_time"]
+                .as_i64()
+                .map(|value| value.to_string())
+                .or_else(|| response["max_time"].as_str().map(str::to_string))
+                .unwrap_or_default();
+
+            if !has_more || next_max_time.is_empty() || next_max_time == max_time {
+                break;
+            }
+            max_time = next_max_time;
+        }
+
+        Ok(ids)
+    }
+
+    pub async fn get_following_sec_user_ids(
+        &self,
+        user_id: &str,
+        sec_uid: &str,
+        limit: usize,
+        mutual_only: bool,
+    ) -> Result<Vec<String>> {
+        let mut ids = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut max_time = "0".to_string();
+        for _ in 0..20 {
+            let mut params = HashMap::new();
+            params.insert("user_id", user_id.to_string());
+            params.insert("sec_user_id", sec_uid.to_string());
+            params.insert("count", "100".to_string());
+            params.insert("max_time", max_time.clone());
+            params.insert("min_time", "0".to_string());
+            params.insert("source_type", "1".to_string());
+
+            let response = self
+                .request_raw_json(
+                    "https://www.douyin.com/aweme/v1/web/user/following/list/",
+                    Some(params),
+                    "GET",
+                )
+                .await?;
+
+            let status_code = response["status_code"].as_i64().unwrap_or(0);
+            if status_code != 0 {
+                let status_msg = response["status_msg"]
+                    .as_str()
+                    .or_else(|| response["message"].as_str())
+                    .unwrap_or("请求失败");
+                return Err(anyhow!("获取关注列表失败: {}", status_msg));
+            }
+
+            let users = response["followings"]
+                .as_array()
+                .or_else(|| response["user_list"].as_array())
+                .or_else(|| response["data"].as_array())
+                .cloned()
+                .unwrap_or_default();
+            for user in users {
+                if mutual_only && user["follower_status"].as_i64().unwrap_or_default() <= 0 {
+                    continue;
+                }
+                let id = user["sec_uid"]
+                    .as_str()
+                    .or_else(|| user["sec_user_id"].as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if !id.is_empty() && seen.insert(id.clone()) {
+                    ids.push(id);
+                    if ids.len() >= limit {
+                        return Ok(ids);
+                    }
+                }
+            }
+
+            let has_more = response["has_more"]
+                .as_bool()
+                .or_else(|| response["has_more"].as_i64().map(|value| value == 1))
+                .unwrap_or(false);
+            let next_max_time = response["max_time"]
+                .as_i64()
+                .map(|value| value.to_string())
+                .or_else(|| response["max_time"].as_str().map(str::to_string))
+                .unwrap_or_default();
+
+            if next_max_time.is_empty() || next_max_time == max_time {
+                break;
+            }
+            if !has_more {
+                break;
+            }
+            max_time = next_max_time;
+        }
+
+        Ok(ids)
     }
 
     async fn request_relation_update(

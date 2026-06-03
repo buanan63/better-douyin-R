@@ -16,6 +16,12 @@ pub struct AppConfig {
     pub cookie: String,
     /// 抖音关系动作签名数据
     pub relation_signer: Option<RelationSignerConfig>,
+    /// 登录时自动采集到的 IM 好友 sec_user_id 列表
+    #[serde(default)]
+    pub im_friend_sec_user_ids: Vec<String>,
+    /// IM 好友在线状态是否包含全部 spotlight 候选用户；默认只显示互关用户
+    #[serde(default)]
+    pub im_friend_include_all_users: bool,
     /// 代理设置
     pub proxy: Option<String>,
     /// 最大并发下载数
@@ -71,6 +77,8 @@ impl Default for AppConfig {
             download_path,
             cookie: String::new(),
             relation_signer: None,
+            im_friend_sec_user_ids: Vec::new(),
+            im_friend_include_all_users: false,
             proxy: None,
             max_concurrent: 3,
             download_quality: default_download_quality(),
