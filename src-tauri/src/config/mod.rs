@@ -22,6 +22,9 @@ pub struct AppConfig {
     /// IM 好友在线状态是否包含全部 spotlight 候选用户；默认只显示互关用户
     #[serde(default)]
     pub im_friend_include_all_users: bool,
+    /// IM 好友在线状态刷新间隔，单位秒
+    #[serde(default = "default_im_friend_refresh_interval_seconds")]
+    pub im_friend_refresh_interval_seconds: u64,
     /// 代理设置
     pub proxy: Option<String>,
     /// 最大并发下载数
@@ -66,6 +69,9 @@ fn default_true() -> bool {
 fn default_download_quality() -> String {
     "auto".to_string()
 }
+fn default_im_friend_refresh_interval_seconds() -> u64 {
+    5
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -79,6 +85,7 @@ impl Default for AppConfig {
             relation_signer: None,
             im_friend_sec_user_ids: Vec::new(),
             im_friend_include_all_users: false,
+            im_friend_refresh_interval_seconds: default_im_friend_refresh_interval_seconds(),
             proxy: None,
             max_concurrent: 3,
             download_quality: default_download_quality(),

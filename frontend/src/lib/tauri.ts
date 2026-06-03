@@ -248,6 +248,8 @@ export async function saveConfig(config: Partial<AppConfig>): Promise<{ success:
     im_friend_sec_user_ids: config.im_friend_sec_user_ids ?? current.im_friend_sec_user_ids ?? [],
     im_friend_include_all_users:
       config.im_friend_include_all_users ?? current.im_friend_include_all_users ?? false,
+    im_friend_refresh_interval_seconds:
+      config.im_friend_refresh_interval_seconds ?? current.im_friend_refresh_interval_seconds ?? 5,
     theme: config.theme ?? current.theme ?? "dark",
     language: config.language ?? current.language ?? "zh-CN",
   };

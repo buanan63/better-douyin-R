@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ElementType } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ElementType } from "react";
 import { motion } from "framer-motion";
 import { Activity, ChevronDown, Loader2, RefreshCw, Users, Wifi, WifiOff } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -23,6 +23,7 @@ type JsonRecord = Record<string, unknown>;
 
 const STORAGE_KEY = "douyin.friendStatus.secUserIds";
 const ONLINE_WINDOW_SECONDS = 60;
+const DEFAULT_REFRESH_INTERVAL_SECONDS = 5;
 
 function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -175,20 +176,43 @@ export function FriendsStatusView() {
   const [savedIds, setSavedIds] = useState<string[]>([]);
   const [savedCount, setSavedCount] = useState(0);
   const [includeAllUsers, setIncludeAllUsers] = useState(false);
+  const [refreshIntervalSeconds, setRefreshIntervalSeconds] = useState(DEFAULT_REFRESH_INTERVAL_SECONDS);
   const [showManualInput, setShowManualInput] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [backgroundRefreshing, setBackgroundRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [response, setResponse] = useState<FriendOnlineStatusResponse | null>(null);
+  const savedIdsRef = useRef<string[]>([]);
+  const idsRef = useRef<string[]>([]);
+  const queryInFlightRef = useRef(false);
+  const initialInputRef = useRef(input);
 
   const ids = useMemo(() => extractIds(input), [input]);
   const friends = useMemo(() => (response?.success ? mapResponse(response) : []), [response]);
   const onlineCount = friends.filter((friend) => friend.online).length;
   const offlineCount = friends.filter((friend) => !friend.online).length;
+  const isInitialLoading = loading && friends.length === 0;
 
-  const query = async (overrideIds?: string[]) => {
-    const queryIds = Array.from(new Set([...(overrideIds ?? savedIds), ...ids]));
-    setError("");
-    setLoading(true);
+  useEffect(() => {
+    idsRef.current = ids;
+  }, [ids]);
+
+  useEffect(() => {
+    savedIdsRef.current = savedIds;
+  }, [savedIds]);
+
+  const query = useCallback(async (overrideIds?: string[], options?: { background?: boolean }) => {
+    if (queryInFlightRef.current) return;
+    const background = Boolean(options?.background);
+    const baseIds = overrideIds ?? savedIdsRef.current;
+    const queryIds = Array.from(new Set([...baseIds, ...idsRef.current]));
+    queryInFlightRef.current = true;
+    if (!background) {
+      setError("");
+      setLoading(true);
+    } else {
+      setBackgroundRefreshing(true);
+    }
     try {
       localStorage.setItem(STORAGE_KEY, queryIds.join("\n"));
       const result = await getFriendOnlineStatus(queryIds);
@@ -205,25 +229,14 @@ export function FriendsStatusView() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "获取好友在线状态失败");
     } finally {
-      setLoading(false);
-    }
-  };
-
-  const toggleIncludeAllUsers = async () => {
-    const nextValue = !includeAllUsers;
-    setIncludeAllUsers(nextValue);
-    setError("");
-    try {
-      const result = await saveConfig({ im_friend_include_all_users: nextValue });
-      if (!result.success) {
-        throw new Error(result.message || "保存好友范围设置失败");
+      queryInFlightRef.current = false;
+      if (background) {
+        setBackgroundRefreshing(false);
+      } else {
+        setLoading(false);
       }
-      void query([]);
-    } catch (caught) {
-      setIncludeAllUsers(!nextValue);
-      setError(caught instanceof Error ? caught.message : "保存好友范围设置失败");
     }
-  };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -235,8 +248,10 @@ export function FriendsStatusView() {
           : [];
         setSavedIds(savedIds);
         setSavedCount(savedIds.length);
+        const nextInterval = Number(config.im_friend_refresh_interval_seconds) || DEFAULT_REFRESH_INTERVAL_SECONDS;
         setIncludeAllUsers(Boolean(config.im_friend_include_all_users));
-        if (!input.trim() && savedIds.length > 0) {
+        setRefreshIntervalSeconds(Math.max(0, nextInterval));
+        if (!initialInputRef.current.trim() && savedIds.length > 0) {
           setInput(savedIds.join("\n"));
         }
         void query(savedIds);
@@ -247,7 +262,32 @@ export function FriendsStatusView() {
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [query]);
+
+  const toggleIncludeAllUsers = async () => {
+    const nextValue = !includeAllUsers;
+    const previousValue = includeAllUsers;
+    setIncludeAllUsers(nextValue);
+    setError("");
+    try {
+      const result = await saveConfig({ im_friend_include_all_users: nextValue });
+      if (!result.success) {
+        throw new Error(result.message || "保存好友范围设置失败");
+      }
+      void query([], { background: friends.length > 0 });
+    } catch (caught) {
+      setIncludeAllUsers(previousValue);
+      setError(caught instanceof Error ? caught.message : "保存好友范围设置失败");
+    }
+  };
+
+  useEffect(() => {
+    if (refreshIntervalSeconds <= 0) return;
+    const timer = window.setInterval(() => {
+      void query(undefined, { background: true });
+    }, Math.max(1, refreshIntervalSeconds) * 1000);
+    return () => window.clearInterval(timer);
+  }, [query, refreshIntervalSeconds]);
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-5">
@@ -289,6 +329,12 @@ export function FriendsStatusView() {
             </span>
             {includeAllUsers ? "全部用户" : "仅互关"}
           </button>
+          {backgroundRefreshing && (
+            <span className="inline-flex h-8 items-center gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-2.5 text-[0.72rem] text-text-muted">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              后台更新
+            </span>
+          )}
           <Button size="sm" onClick={() => void query()} disabled={loading}>
             {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
             刷新状态
@@ -309,7 +355,7 @@ export function FriendsStatusView() {
           <Metric label="未在线" value={offlineCount} icon={WifiOff} tone="muted" />
         </div>
 
-        {loading ? (
+        {isInitialLoading ? (
           <div className="flex min-h-[280px] items-center justify-center text-[0.82rem] text-text-muted">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             正在查询
