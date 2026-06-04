@@ -56,6 +56,11 @@ type ChatSummaries = Record<string, {
   latestMessageAt: number;
   unreadCount: number;
 }>;
+type ImConnectionStatus = {
+  connected: boolean;
+  message: string;
+  updatedAt: number;
+};
 
 interface FriendListItem extends FriendStatusItem {
   latestMessage?: LocalChatMessage;
@@ -359,6 +364,11 @@ export function FriendsStatusView() {
   const [includeAllUsers, setIncludeAllUsers] = useState(false);
   const [refreshIntervalSeconds, setRefreshIntervalSeconds] = useState(DEFAULT_REFRESH_INTERVAL_SECONDS);
   const [currentUserAvatar, setCurrentUserAvatar] = useState("");
+  const [imStatus, setImStatus] = useState<ImConnectionStatus>({
+    connected: false,
+    message: "接收通道未连接",
+    updatedAt: 0,
+  });
   const [showManualInput, setShowManualInput] = useState(false);
   const [loading, setLoading] = useState(false);
   const [backgroundRefreshing, setBackgroundRefreshing] = useState(false);
@@ -743,6 +753,25 @@ export function FriendsStatusView() {
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
+    void listenEvent<Record<string, unknown>>("im-status", (payload) => {
+      if (disposed || !payload || typeof payload !== "object") return;
+      setImStatus({
+        connected: Boolean(payload.connected),
+        message: stringField(payload, ["message"]) || (payload.connected ? "私信接收已连接" : "私信接收未连接"),
+        updatedAt: numberField(payload, ["updated_at", "updatedAt"]) || Date.now(),
+      });
+    }).then((cleanup) => {
+      unlisten = cleanup;
+    });
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
     void listenEvent<Record<string, unknown>>("im-message", (payload) => {
       if (disposed || !payload || typeof payload !== "object") return;
       const senderUid = stringField(payload, ["sender_uid", "senderUid"]);
@@ -937,6 +966,23 @@ export function FriendsStatusView() {
               : lastUpdatedAt
                 ? ` · 上次更新于 ${formatUpdateTime(lastUpdatedAt)}`
                 : ""}
+          </span>
+          <span
+            className={cn(
+              "flex h-6 shrink-0 items-center gap-1.5 rounded-full border px-2 text-[0.68rem]",
+              imStatus.connected
+                ? "border-success/25 bg-success-soft text-success"
+                : "border-border bg-surface-solid text-text-muted",
+            )}
+            title={imStatus.updatedAt ? `${imStatus.message} · ${formatUpdateTime(imStatus.updatedAt)}` : imStatus.message}
+          >
+            <span
+              className={cn(
+                "h-1.5 w-1.5 rounded-full",
+                imStatus.connected ? "bg-success" : "bg-text-muted",
+              )}
+            />
+            {imStatus.connected ? "接收已连接" : "接收未连接"}
           </span>
         </div>
         <div className="relative flex flex-wrap items-center gap-2">

@@ -767,18 +767,32 @@ fn emit_im_message(app: &tauri::AppHandle, response: &serde_json::Value) {
     let _ = app.emit("im-message", payload);
 }
 
+fn emit_im_status(app: &tauri::AppHandle, connected: bool, message: impl Into<String>) {
+    let _ = app.emit(
+        "im-status",
+        serde_json::json!({
+            "connected": connected,
+            "message": message.into(),
+            "updated_at": chrono::Utc::now().timestamp_millis(),
+        }),
+    );
+}
+
 async fn run_im_message_listener(
     app: tauri::AppHandle,
     client: DouyinClient,
 ) -> anyhow::Result<()> {
     let Some(sessionid) = client.im_session_id() else {
         log::info!("IM WebSocket not started: saved cookie has no sessionid");
+        emit_im_status(&app, false, "Cookie 缺少 sessionid，私信接收未启动");
         return Ok(());
     };
     let cookie = client.cookie().trim().to_string();
     if cookie.is_empty() {
+        emit_im_status(&app, false, "Cookie 为空，私信接收未启动");
         return Ok(());
     }
+    emit_im_status(&app, false, "正在连接私信接收");
     let device_id = client.get_im_device_id().await?;
     let app_key = "e1bd35ec9db7b8d846de66ed140b1ad9";
     let fp_id = "9";
@@ -814,6 +828,7 @@ async fn run_im_message_listener(
 
     let (mut ws, _) = tokio_tungstenite::connect_async(request).await?;
     log::info!("Douyin IM WebSocket connected");
+    emit_im_status(&app, true, "私信接收已连接");
     while let Some(message) = ws.next().await {
         let message = message?;
         if message.is_binary() {
@@ -826,6 +841,7 @@ async fn run_im_message_listener(
         }
     }
     log::info!("Douyin IM WebSocket disconnected");
+    emit_im_status(&app, false, "私信接收已断开");
     Ok(())
 }
 
@@ -843,8 +859,9 @@ async fn ensure_im_message_listener(state: &AppState, client: DouyinClient) {
         return;
     }
     *listener = Some(tokio::spawn(async move {
-        if let Err(error) = run_im_message_listener(app, client).await {
+        if let Err(error) = run_im_message_listener(app.clone(), client).await {
             log::warn!("Douyin IM WebSocket listener exited: {}", error);
+            emit_im_status(&app, false, format!("私信接收连接错误: {error}"));
         }
     }));
 }
