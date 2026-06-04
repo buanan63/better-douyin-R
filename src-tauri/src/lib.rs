@@ -2461,6 +2461,14 @@ async fn get_friend_message_history(
     let to_user_id = to_user_id.or(uid);
     let conversation_short_id = coerce_i64(conversation_short_id.as_ref(), 0);
     let conversation_type = coerce_i64(conversation_type.as_ref(), 1).max(1);
+    log::info!(
+        "get_friend_message_history invoked: cursor={} to_user_id_present={} conversation_id_present={} conversation_short_id={}",
+        cursor.unwrap_or_default().max(0),
+        to_user_id.as_ref().map(|value| !value.trim().is_empty()).unwrap_or(false),
+        conversation_id.as_ref().map(|value| !value.trim().is_empty()).unwrap_or(false),
+        conversation_short_id
+    );
+
     match client
         .get_im_history_messages(
             cursor.unwrap_or_default().max(0),
@@ -2475,7 +2483,19 @@ async fn get_friend_message_history(
         )
         .await
     {
-        Ok(result) => Ok(json_object_with_success(result)),
+        Ok(result) => {
+            let count = result
+                .get("messages")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len())
+                .unwrap_or_default();
+            log::info!(
+                "get_friend_message_history completed: messages={} next_cursor={}",
+                count,
+                result.get("next_cursor").cloned().unwrap_or_default()
+            );
+            Ok(json_object_with_success(result))
+        }
         Err(error) => Ok(api_login_or_verify_error_response(
             &client,
             "获取历史消息失败",

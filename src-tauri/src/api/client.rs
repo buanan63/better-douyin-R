@@ -5,9 +5,9 @@ use crate::sign;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use hmac::{Hmac, Mac};
-use p256::ecdsa::signature::Signer;
-use p256::ecdsa::{Signature, SigningKey};
-use p256::pkcs8::DecodePrivateKey;
+use openssl::hash::MessageDigest;
+use openssl::pkey::PKey;
+use openssl::sign::Signer;
 use rand::{distributions::Alphanumeric, Rng};
 use regex::Regex;
 use reqwest::redirect::Policy;
@@ -273,10 +273,17 @@ impl DouyinClient {
 
     fn ecdsa_request_sign(value: &str, private_key: &str) -> Result<String> {
         let pem = private_key.trim().replace("\\n", "\n");
-        let key = SigningKey::from_pkcs8_pem(&pem)
+        let key = PKey::private_key_from_pem(pem.as_bytes())
             .map_err(|error| anyhow!("私信签名生成失败: {}", error))?;
-        let signature: Signature = key.sign(value.as_bytes());
-        Ok(base64::engine::general_purpose::STANDARD.encode(signature.to_der().as_bytes()))
+        let mut signer = Signer::new(MessageDigest::sha256(), &key)
+            .map_err(|error| anyhow!("私信签名生成失败: {}", error))?;
+        signer
+            .update(value.as_bytes())
+            .map_err(|error| anyhow!("私信签名生成失败: {}", error))?;
+        let signature = signer
+            .sign_to_vec()
+            .map_err(|error| anyhow!("私信签名生成失败: {}", error))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(signature))
     }
 
     fn build_im_request_common_headers(&self) -> HashMap<String, String> {
@@ -605,6 +612,7 @@ impl DouyinClient {
         }
 
         let mut headers = crate::config::get_common_headers(&self.config.cookie);
+        headers.extend(Self::ticket_guard_headers_from_cookie(&self.config.cookie));
         if let Some(extra) = extra_headers {
             headers.extend(extra);
         }
@@ -3009,6 +3017,40 @@ impl DouyinClient {
         }))
     }
 
+    fn filter_im_history_for_user(result: serde_json::Value, uid: &str) -> serde_json::Value {
+        let uid = uid.trim();
+        if uid.is_empty() {
+            return result;
+        }
+        let messages = result
+            .get("messages")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| {
+                        item.get("sender_uid")
+                            .and_then(|value| value.as_str())
+                            .map(|sender| sender == uid)
+                            .unwrap_or(false)
+                            || item
+                                .get("conversation_id")
+                                .and_then(|value| value.as_str())
+                                .map(|conversation_id| conversation_id.contains(uid))
+                                .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        serde_json::json!({
+            "message": result.get("message").cloned().unwrap_or_else(|| serde_json::json!("获取历史消息成功")),
+            "messages": messages,
+            "next_cursor": result.get("next_cursor").cloned().unwrap_or_default(),
+            "has_more": result.get("has_more").and_then(|value| value.as_bool()).unwrap_or(false),
+        })
+    }
+
     pub async fn get_im_history_messages(
         &self,
         cursor: i64,
@@ -3018,6 +3060,7 @@ impl DouyinClient {
         conversation_type: i64,
     ) -> Result<serde_json::Value> {
         self.im_proto_signer()?;
+        let mut created_conversation_for_user = false;
         let conversation = if let (Some(conversation_id), Some(short_id)) = (
             conversation_id.filter(|value| !value.trim().is_empty()),
             conversation_short_id.filter(|value| *value > 0),
@@ -3028,13 +3071,32 @@ impl DouyinClient {
                 "conversation_type": if conversation_type > 0 { conversation_type } else { 1 },
             }))
         } else if let Some(uid) = to_user_id.filter(|value| !value.trim().is_empty()) {
-            Some(self.create_im_conversation(uid).await?)
+            match self.create_im_conversation(uid).await {
+                Ok(conversation) => {
+                    created_conversation_for_user = true;
+                    Some(conversation)
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Douyin IM create conversation failed, falling back to recent history: uid={} error={}",
+                        uid,
+                        error
+                    );
+                    let recent = self.get_im_recent_user_messages(cursor).await?;
+                    return Ok(Self::filter_im_history_for_user(recent, uid));
+                }
+            }
         } else {
             None
         };
 
         let Some(conversation) = conversation else {
-            return self.get_im_recent_user_messages(cursor).await;
+            let recent = self.get_im_recent_user_messages(cursor).await?;
+            return Ok(if let Some(uid) = to_user_id {
+                Self::filter_im_history_for_user(recent, uid)
+            } else {
+                recent
+            });
         };
 
         let conversation_id = conversation
@@ -3057,13 +3119,29 @@ impl DouyinClient {
             50,
         );
         let payload = self.build_im_pc_proto_request(301, &body)?;
-        let response = self
+        let response = match self
             .post_im_proto(
                 "https://imapi.douyin.com/v1/message/get_by_conversation",
                 payload,
                 false,
             )
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if created_conversation_for_user => {
+                if let Some(uid) = to_user_id {
+                    log::warn!(
+                        "Douyin IM conversation history failed, falling back to recent history: uid={} error={}",
+                        uid,
+                        error
+                    );
+                    let recent = self.get_im_recent_user_messages(cursor).await?;
+                    return Ok(Self::filter_im_history_for_user(recent, uid));
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let body = response
             .pointer("/body/get_by_conversation_body")
             .cloned()
@@ -3073,7 +3151,7 @@ impl DouyinClient {
             .and_then(|value| value.as_array())
             .cloned()
             .unwrap_or_default();
-        Ok(serde_json::json!({
+        let result = serde_json::json!({
             "message": "获取历史消息成功",
             "messages": Self::normalize_im_messages(&messages),
             "next_cursor": body.get("next_cursor").cloned().unwrap_or_default(),
@@ -3083,7 +3161,21 @@ impl DouyinClient {
                 "conversation_short_id": conversation_short_id,
                 "conversation_type": conversation_type,
             },
-        }))
+        });
+
+        let message_count = result
+            .get("messages")
+            .and_then(|value| value.as_array())
+            .map(|items| items.len())
+            .unwrap_or_default();
+        if message_count == 0 && created_conversation_for_user {
+            if let Some(uid) = to_user_id {
+                let recent = self.get_im_recent_user_messages(cursor).await?;
+                return Ok(Self::filter_im_history_for_user(recent, uid));
+            }
+        }
+
+        Ok(result)
     }
 
     pub async fn get_im_spotlight_relation_sec_user_ids(
@@ -3560,6 +3652,10 @@ impl DouyinClient {
 
     /// 获取当前用户信息 (需要登录)
     pub async fn get_current_user(&self) -> Result<UserInfo> {
+        if let Ok(user) = self.get_current_user_from_query_user().await {
+            return Ok(user);
+        }
+
         let response = self
             .request_raw_json_with_options(
                 "https://www.douyin.com/aweme/v1/web/user/profile/self/",
@@ -3568,7 +3664,10 @@ impl DouyinClient {
                 None,
                 true,
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                anyhow!("当前登录态可访问 IM 接口，但个人资料接口不可用: {}", error)
+            })?;
 
         let status_code = response["status_code"].as_i64().unwrap_or(-1);
         if status_code != 0 {
@@ -3596,6 +3695,63 @@ impl DouyinClient {
             sec_uid: data["sec_uid"].as_str().unwrap_or_default().to_string(),
             unique_id: data["unique_id"].as_str().unwrap_or_default().to_string(),
             verify_status: data["verify_status"].as_i64().unwrap_or(0) as i32,
+        })
+    }
+
+    async fn get_current_user_from_query_user(&self) -> Result<UserInfo> {
+        let mut params = HashMap::new();
+        params.insert("publish_video_strategy_type", "2".to_string());
+        let headers = HashMap::from([(
+            "Referer".to_string(),
+            "https://www.douyin.com/discover".to_string(),
+        )]);
+        let response = self
+            .request_raw_json_with_options(
+                "https://www.douyin.com/aweme/v1/web/query/user",
+                Some(params),
+                "GET",
+                Some(headers),
+                false,
+            )
+            .await?;
+        let status_code = response["status_code"].as_i64().unwrap_or(0);
+        if status_code != 0 {
+            let status_msg = response["status_msg"]
+                .as_str()
+                .or_else(|| response["message"].as_str())
+                .unwrap_or("unknown error");
+            return Err(anyhow!("API error: {}", status_msg));
+        }
+        let uid = response
+            .get("user_uid")
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .map(ToString::to_string)
+                    .or_else(|| value.as_i64().map(|number| number.to_string()))
+            })
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if uid.is_empty() {
+            return Err(anyhow!("query/user 未返回 user_uid"));
+        }
+        Ok(UserInfo {
+            uid: uid.clone(),
+            nickname: "抖音用户".to_string(),
+            avatar_thumb: String::new(),
+            avatar_medium: String::new(),
+            avatar_larger: String::new(),
+            signature: String::new(),
+            follower_count: 0,
+            following_count: 0,
+            total_favorited: 0,
+            aweme_count: 0,
+            favoriting_count: 0,
+            is_follow: false,
+            sec_uid: String::new(),
+            unique_id: uid,
+            verify_status: 0,
         })
     }
 }

@@ -26,7 +26,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 
 # HTTP 客户端
-reqwest = { version = "0.12", features = ["json", "cookies", "gzip", "brotli", "stream"] }
+reqwest = { version = "0.12", features = ["json", "cookies", "gzip", "brotli", "zstd", "stream"] }
 tokio = { version = "1", features = ["full"] }
 
 # JSON 处理
@@ -37,6 +37,7 @@ hmac = "0.12"
 sha2 = "0.10"
 md5 = "0.7"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+openssl = "0.10"
 
 # 时间处理
 chrono = { version = "0.4", features = ["serde"] }
