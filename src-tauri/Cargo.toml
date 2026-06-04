@@ -60,6 +60,7 @@ scraper = "0.19"
 # 异步通道
 futures = "0.3"
 tower-http = { version = "0.6", features = ["fs"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 
 # UUID
 uuid = { version = "1", features = ["v4"] }

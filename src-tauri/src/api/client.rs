@@ -82,6 +82,19 @@ impl DouyinClient {
         cookie_dict
     }
 
+    pub fn cookie(&self) -> &str {
+        &self.config.cookie
+    }
+
+    pub fn im_session_id(&self) -> Option<String> {
+        let cookie_dict = Self::cookies_to_dict(&self.config.cookie);
+        cookie_dict
+            .get("sessionid")
+            .or_else(|| cookie_dict.get("sessionid_ss"))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
     fn ticket_guard_headers_from_cookie(cookie_str: &str) -> HashMap<String, String> {
         let cookie_dict = Self::cookies_to_dict(cookie_str);
         let mut headers = HashMap::new();
@@ -3127,6 +3140,39 @@ impl DouyinClient {
         }
 
         Ok(ids)
+    }
+
+    pub async fn get_im_device_id(&self) -> Result<String> {
+        let mut params = HashMap::new();
+        params.insert("publish_video_strategy_type", "2".to_string());
+        let headers = HashMap::from([(
+            "Referer".to_string(),
+            "https://www.douyin.com/discover".to_string(),
+        )]);
+        let response = self
+            .request_raw_json_with_options(
+                "https://www.douyin.com/aweme/v1/web/query/user",
+                Some(params),
+                "GET",
+                Some(headers),
+                false,
+            )
+            .await?;
+        let device_id = response
+            .get("id")
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .map(ToString::to_string)
+                    .or_else(|| value.as_i64().map(|number| number.to_string()))
+            })
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if device_id.is_empty() {
+            return Err(anyhow!("未获取到 IM device_id"));
+        }
+        Ok(device_id)
     }
 
     pub async fn get_following_sec_user_ids(

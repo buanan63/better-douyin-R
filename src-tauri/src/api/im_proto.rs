@@ -15,6 +15,9 @@ pub struct SentMessageInfo {
     pub conversation_short_id: i64,
     pub conversation_type: i64,
     pub server_message_id: i64,
+    pub index_in_conversation: i64,
+    pub sender: i64,
+    pub content: String,
 }
 
 fn varint(mut value: u64) -> Vec<u8> {
@@ -346,6 +349,43 @@ pub fn sent_message(response: &Value) -> Option<SentMessageInfo> {
             })
             .unwrap_or(1),
         server_message_id,
+        index_in_conversation: item
+            .get("index_in_conversation")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_default(),
+        sender: item
+            .get("sender")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_default(),
+        content: item
+            .get("content")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+pub fn parse_push_frame(data: &[u8]) -> Value {
+    let fields = parse_fields(data);
+    let payload = first_bytes(&fields, 8);
+    let payload_type = first_string(&fields, 7);
+    json!({
+        "seq_id": first_int(&fields, 1),
+        "log_id": first_int(&fields, 2),
+        "service": first_int(&fields, 3),
+        "method": first_int(&fields, 4),
+        "payload_encoding": first_string(&fields, 6),
+        "payload_type": payload_type,
+        "payload": if payload.is_empty() {
+            Value::Null
+        } else {
+            Value::String(String::from_utf8_lossy(&payload).to_string())
+        },
+        "response": if !payload.is_empty() && payload_type == "pb" {
+            parse_response(&payload)
+        } else {
+            Value::Null
+        },
     })
 }
 
