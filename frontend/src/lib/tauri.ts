@@ -2,7 +2,6 @@
 // Tauri IPC Wrappers
 // ═══════════════════════════════════════════════
 
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import type {
@@ -213,14 +212,10 @@ export function localFileAssetUrl(path: string | null | undefined): string {
   const trimmed = (path || "").trim();
   if (!trimmed) return "";
   if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed;
-  if (!isTauriRuntime()) {
-    return `/api/local-media?path=${encodeURIComponent(trimmed)}`;
-  }
-  try {
-    return convertFileSrc(trimmed);
-  } catch {
-    return "";
-  }
+  const base = isTauriRuntime()
+    ? "http://127.0.0.1:39143/api/local-media"
+    : "/api/local-media";
+  return `${base}?path=${encodeURIComponent(trimmed)}`;
 }
 
 async function writeTextWithBrowserClipboard(text: string): Promise<boolean> {
