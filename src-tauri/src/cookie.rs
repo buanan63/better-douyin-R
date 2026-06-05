@@ -80,6 +80,13 @@ pub fn has_douyin_login_cookie(cookies: &[Cookie<'static>]) -> bool {
         || cookie_names.contains("sid_guard")
 }
 
+pub fn has_douyin_session_cookie(cookies: &[Cookie<'static>]) -> bool {
+    cookies.iter().any(|cookie| {
+        matches!(cookie.name(), "sessionid" | "sessionid_ss")
+            && !cookie.value().trim().is_empty()
+    })
+}
+
 pub async fn verify_douyin_login_cookie(
     config: &AppConfig,
     cookie: &str,

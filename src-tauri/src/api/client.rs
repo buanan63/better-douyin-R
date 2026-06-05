@@ -4032,7 +4032,7 @@ impl DouyinClient {
             }),
             Err(e) => {
                 let cookies = crate::cookie::parse_cookie_string(&self.config.cookie);
-                if crate::cookie::has_douyin_login_cookie(&cookies) {
+                if crate::cookie::has_douyin_session_cookie(&cookies) {
                     match self.check_passport_account_expired().await {
                         Ok(Some(message)) => {
                             log::warn!("Douyin passport reports saved cookie expired: {}", message);
@@ -4058,7 +4058,7 @@ impl DouyinClient {
                         e
                     );
                     return Ok(CookieStatus {
-                        valid: false,
+                        valid: true,
                         user_name: None,
                         user_id: None,
                         sec_uid: None,
@@ -4067,7 +4067,7 @@ impl DouyinClient {
                         avatar_larger: None,
                         expires_at: None,
                         message: format!(
-                            "Cookie 已保存但登录态校验失败，请重新登录或完成验证: {}",
+                            "Cookie 已保存，登录态接口暂时无法确认；私信功能会继续使用当前会话: {}",
                             e
                         ),
                     });
