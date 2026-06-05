@@ -76,7 +76,7 @@ jobs:
         run: npm ci --prefix frontend
 
       - name: Verify Tauri CLI
-        run: npm --prefix frontend exec tauri -- --version
+        run: npm --prefix frontend run tauri -- --version
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
@@ -85,7 +85,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tauriScript: npm --prefix frontend exec tauri --
+          tauriScript: npm --prefix frontend run tauri --
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: 'better-douyin-R ${{ env.RELEASE_TAG }}'
           releaseBody: ${{ env.RELEASE_NOTES }}
@@ -154,7 +154,7 @@ jobs:
         run: npm ci --prefix frontend
 
       - name: Verify Tauri CLI
-        run: npm --prefix frontend exec tauri -- --version
+        run: npm --prefix frontend run tauri -- --version
 
       - name: Build Tauri app (NSIS installer)
         uses: tauri-apps/tauri-action@v0
@@ -163,7 +163,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tauriScript: npm --prefix frontend exec tauri --
+          tauriScript: npm --prefix frontend run tauri --
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: 'better-douyin-R ${{ env.RELEASE_TAG }}'
           releaseBody: ${{ env.RELEASE_NOTES }}
@@ -208,10 +208,10 @@ jobs:
         run: npm ci --prefix frontend
 
       - name: Verify Tauri CLI
-        run: npm --prefix frontend exec tauri -- --version
+        run: npm --prefix frontend run tauri -- --version
 
       - name: Build portable exe
-        run: npm --prefix frontend exec tauri -- build --target x86_64-pc-windows-msvc --no-bundle
+        run: npm --prefix frontend run tauri -- build --target x86_64-pc-windows-msvc --no-bundle
 
       - name: Package portable exe
         shell: pwsh
@@ -270,14 +270,14 @@ jobs:
             Write-Error "Could not find portable exe to sign"
             exit 1
           }
-          npm --prefix frontend exec tauri -- signer sign $portable.FullName
+          npm --prefix frontend run tauri -- signer sign $portable.FullName
 
           $portableZip = Get-ChildItem -Path . -Filter "better-douyin-R-v*-windows-x64-portable.zip" -File | Select-Object -First 1
           if (-not $portableZip) {
             Write-Error "Could not find portable zip to sign"
             exit 1
           }
-          npm --prefix frontend exec tauri -- signer sign $portableZip.FullName
+          npm --prefix frontend run tauri -- signer sign $portableZip.FullName
 
       - name: Upload portable assets to release
         uses: softprops/action-gh-release@v2
@@ -326,7 +326,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
 
       - name: Verify Tauri CLI
-        run: npm --prefix frontend exec tauri -- --version
+        run: npm --prefix frontend run tauri -- --version
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
@@ -335,7 +335,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tauriScript: npm --prefix frontend exec tauri --
+          tauriScript: npm --prefix frontend run tauri --
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: 'better-douyin-R ${{ env.RELEASE_TAG }}'
           releaseBody: ${{ env.RELEASE_NOTES }}

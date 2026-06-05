@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "tauri": "tauri",
     "check:api": "node ../scripts/check-api-surface.mjs",
     "check:parity": "node ../scripts/check-frontend-parity.mjs",
     "check:shared": "npm run check:parity && npm run check:api",
