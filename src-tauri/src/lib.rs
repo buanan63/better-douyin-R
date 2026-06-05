@@ -2461,6 +2461,7 @@ async fn send_friend_message(
 
 /// 发送图片私信。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn send_friend_image_message(
     state: State<'_, AppState>,
     to_user_id: Option<String>,
