@@ -18,6 +18,7 @@ const baseUrl = `https://github.com/${repository}/releases/download/${version}`;
 const previous = fs.existsSync('latest.json')
   ? JSON.parse(fs.readFileSync('latest.json', 'utf8'))
   : {};
+const releaseNotes = (process.env.RELEASE_NOTES || process.env.RELEASE_BODY || '').trim();
 
 function readSignature(assetName) {
   const sigPath = `${assetName}.sig`;
@@ -39,8 +40,8 @@ const assets = {
 
 const metadata = {
   version: appVersion,
-  notes: process.env.RELEASE_BODY || previous.notes || '',
-  pub_date: previous.pub_date || '',
+  notes: releaseNotes || previous.notes || `better-douyin-R v${appVersion}`,
+  pub_date: previous.pub_date || new Date().toISOString(),
   platforms: {
     'darwin-aarch64': {
       signature: readSignature(assets.darwinArmApp),
