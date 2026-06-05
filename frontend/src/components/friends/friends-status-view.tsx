@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { FullscreenPlayer } from "@/components/player/fullscreen-player";
+import { useDownloads } from "@/hooks/use-downloads";
 import { getConfig, getFriendChatState, getFriendMessageHistory, getFriendOnlineStatus, getUserDetail, getVideoDetail, listenEvent, mediaProxyUrl, saveConfig, saveFriendChatState, sendFriendImageMessage, sendFriendMessage, verifyCookie, type FriendOnlineStatusResponse } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
@@ -701,6 +702,7 @@ export function FriendsStatusView() {
   const setView = useAppStore((state) => state.setView);
   const setFriendUnreadCount = useAppStore((state) => state.setFriendUnreadCount);
   const openUser = useSearchStore((state) => state.openUser);
+  const { downloadVideo } = useDownloads();
   const [input, setInput] = useState(() => localStorage.getItem(STORAGE_KEY) || "");
   const [chatDrafts, setChatDrafts] = useState<ChatDrafts>(() => readChatDrafts());
   const [chatMessages, setChatMessages] = useState<ChatMessages>(() => readChatMessages());
@@ -1659,6 +1661,7 @@ export function FriendsStatusView() {
         initialIndex={0}
         open={sharedPlayerOpen}
         onClose={() => setSharedPlayerOpen(false)}
+        onDownload={(video) => downloadVideo(video)}
       />
     </div>
   );
