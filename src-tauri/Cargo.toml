@@ -37,7 +37,7 @@ hmac = "0.12"
 sha2 = "0.10"
 md5 = "0.7"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-openssl = "0.10"
+openssl = { version = "0.10", features = ["vendored"] }
 aes-gcm = "0.10"
 
 # 时间处理
