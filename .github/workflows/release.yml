@@ -211,7 +211,7 @@ jobs:
         run: npm --prefix frontend run tauri -- --version
 
       - name: Build portable exe
-        run: npm --prefix frontend run tauri -- build --target x86_64-pc-windows-msvc --no-bundle
+        run: node scripts/run-tauri.mjs build --target x86_64-pc-windows-msvc --no-bundle
 
       - name: Package portable exe
         shell: pwsh

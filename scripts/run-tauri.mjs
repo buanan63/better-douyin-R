@@ -10,7 +10,7 @@ const tauriBin = path.join(repoRoot, 'frontend', 'node_modules', '.bin', binName
 const result = spawnSync(tauriBin, process.argv.slice(2), {
   cwd: repoRoot,
   stdio: 'inherit',
-  shell: false,
+  shell: process.platform === 'win32',
 });
 
 if (result.error) {
