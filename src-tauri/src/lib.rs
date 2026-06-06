@@ -2467,6 +2467,32 @@ async fn get_friend_online_status(
     }))
 }
 
+/// 获取视频分享面板可展示的好友列表。
+#[tauri::command]
+async fn get_share_friends(
+    state: State<'_, AppState>,
+    count: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let client = match get_client(&state).await {
+        Ok(client) => client,
+        Err(_) => return Ok(cookie_required_response()),
+    };
+    ensure_im_message_listener(state.inner(), client.clone()).await;
+
+    match client.get_im_share_friends(count.unwrap_or(50)).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            Ok(api_login_or_verify_error_response(
+                &client,
+                "获取分享好友失败",
+                error,
+                "https://www.douyin.com/",
+            )
+            .await)
+        }
+    }
+}
+
 /// 发送文本私信。
 #[tauri::command]
 async fn send_friend_message(
@@ -2498,6 +2524,52 @@ async fn send_friend_message(
         Err(error) => Ok(api_login_or_verify_error_response(
             &client,
             "发送私信失败",
+            error,
+            "https://www.douyin.com/",
+        )
+        .await),
+    }
+}
+
+/// 发送视频分享卡片私信。
+#[tauri::command]
+async fn send_friend_video_share(
+    state: State<'_, AppState>,
+    to_user_id: Option<String>,
+    uid: Option<String>,
+    video: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let to_user_id = to_user_id.or(uid).unwrap_or_default();
+    if to_user_id.trim().is_empty() {
+        return Ok(serde_json::json!({
+            "success": false,
+            "message": "缺少好友数字 uid，无法分享视频"
+        }));
+    }
+    if !video.is_object()
+        || video
+            .get("aweme_id")
+            .or_else(|| video.get("itemId"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+    {
+        return Ok(serde_json::json!({
+            "success": false,
+            "message": "缺少作品信息，无法分享视频"
+        }));
+    }
+    let client = match get_client(&state).await {
+        Ok(client) => client,
+        Err(_) => return Ok(cookie_required_response()),
+    };
+    ensure_im_message_listener(state.inner(), client.clone()).await;
+    match client.send_im_video_share_message(&to_user_id, video).await {
+        Ok(result) => Ok(json_object_with_success(result)),
+        Err(error) => Ok(api_login_or_verify_error_response(
+            &client,
+            "分享视频失败",
             error,
             "https://www.douyin.com/",
         )
@@ -4341,7 +4413,9 @@ pub fn run() {
             get_mix_videos,
             get_liked_authors,
             get_friend_online_status,
+            get_share_friends,
             send_friend_message,
+            send_friend_video_share,
             send_friend_image_message,
             get_friend_message_history,
             get_friend_chat_state,
