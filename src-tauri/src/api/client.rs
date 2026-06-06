@@ -2583,30 +2583,51 @@ impl DouyinClient {
         aweme_id: &str,
         cursor: i64,
         count: u32,
-    ) -> Result<(Vec<CommentInfo>, i64, bool)> {
+    ) -> Result<(Vec<CommentInfo>, i64, bool, i64)> {
         let mut params = HashMap::new();
         params.insert("aweme_id", aweme_id.to_string());
         params.insert("cursor", cursor.to_string());
         params.insert("count", count.to_string());
+        params.insert("pc_img_format", "webp".to_string());
+        params.insert("item_type", "0".to_string());
+        params.insert("insert_ids", String::new());
+        params.insert("whale_cut_token", String::new());
+        params.insert("cut_version", "1".to_string());
+        params.insert("rcFT", String::new());
 
-        let response: ApiResponse<serde_json::Value> = self
-            .request(
-                "https://www.douyin.com/aweme/v1/web/comment/list/",
+        let extra_headers = HashMap::from([
+            ("Origin".to_string(), "https://www.douyin.com".to_string()),
+            (
+                "Referer".to_string(),
+                format!("https://www.douyin.com/video/{}", aweme_id),
+            ),
+            ("sec-fetch-site".to_string(), "same-site".to_string()),
+        ]);
+
+        let data = self
+            .request_raw_json_with_options(
+                "https://www-hj.douyin.com/aweme/v1/web/comment/list/",
                 Some(params),
                 "GET",
+                Some(extra_headers),
+                false,
             )
             .await?;
 
-        if response.status_code != 0 {
-            return Err(anyhow!("API error: {:?}", response.status_msg));
+        if data["status_code"].as_i64().unwrap_or(0) != 0 {
+            return Err(anyhow!(
+                "API error: {}",
+                data["status_msg"]
+                    .as_str()
+                    .or_else(|| data["message"].as_str())
+                    .unwrap_or("获取评论失败")
+            ));
         }
 
-        let data = response
-            .data
-            .ok_or_else(|| anyhow!("No data in response"))?;
         let comments_data = data["comments"].as_array();
-        let has_more = data["has_more"].as_bool().unwrap_or(false);
+        let has_more = Self::json_has_more(&data);
         let cursor = data["cursor"].as_i64().unwrap_or(0);
+        let total = data["total"].as_i64().unwrap_or(0);
 
         let comments = if let Some(list) = comments_data {
             list.iter().filter_map(|c| self.parse_comment(c)).collect()
@@ -2614,11 +2635,80 @@ impl DouyinClient {
             vec![]
         };
 
-        Ok((comments, cursor, has_more))
+        Ok((comments, cursor, has_more, total))
+    }
+
+    /// 获取评论的二级回复列表
+    pub async fn get_comment_replies(
+        &self,
+        aweme_id: &str,
+        comment_id: &str,
+        cursor: i64,
+        count: u32,
+    ) -> Result<(Vec<CommentInfo>, i64, bool, i64)> {
+        let mut params = HashMap::new();
+        params.insert("item_id", aweme_id.to_string());
+        params.insert("aweme_id", aweme_id.to_string());
+        params.insert("comment_id", comment_id.to_string());
+        params.insert("cursor", cursor.to_string());
+        params.insert("count", count.to_string());
+        params.insert("pc_img_format", "webp".to_string());
+        params.insert("item_type", "0".to_string());
+
+        let extra_headers = HashMap::from([
+            ("Origin".to_string(), "https://www.douyin.com".to_string()),
+            (
+                "Referer".to_string(),
+                format!("https://www.douyin.com/video/{}", aweme_id),
+            ),
+            ("sec-fetch-site".to_string(), "same-site".to_string()),
+        ]);
+
+        let data = self
+            .request_raw_json_with_options(
+                "https://www-hj.douyin.com/aweme/v1/web/comment/list/reply/",
+                Some(params),
+                "GET",
+                Some(extra_headers),
+                false,
+            )
+            .await?;
+
+        if data["status_code"].as_i64().unwrap_or(0) != 0 {
+            return Err(anyhow!(
+                "API error: {}",
+                data["status_msg"]
+                    .as_str()
+                    .or_else(|| data["message"].as_str())
+                    .unwrap_or("获取评论回复失败")
+            ));
+        }
+
+        let comments_data = data["comments"]
+            .as_array()
+            .or_else(|| data["reply_comments"].as_array());
+        let has_more = Self::json_has_more(&data);
+        let cursor = data["cursor"].as_i64().unwrap_or(0);
+        let total = data["total"].as_i64().unwrap_or(0);
+        let comments = if let Some(list) = comments_data {
+            list.iter().filter_map(|c| self.parse_comment(c)).collect()
+        } else {
+            vec![]
+        };
+
+        Ok((comments, cursor, has_more, total))
     }
 
     fn parse_comment(&self, data: &serde_json::Value) -> Option<CommentInfo> {
         let user = &data["user"];
+        let sticker_url = {
+            let static_url = self.get_first_url(&data["sticker"]["static_url"]["url_list"]);
+            if static_url.is_empty() {
+                self.get_first_url(&data["sticker"]["animate_url"]["url_list"])
+            } else {
+                static_url
+            }
+        };
         Some(CommentInfo {
             cid: data["cid"].as_str()?.to_string(),
             text: data["text"].as_str().unwrap_or_default().to_string(),
@@ -2633,6 +2723,8 @@ impl DouyinClient {
             reply_comment_total: data["reply_comment_total"].as_i64().unwrap_or(0),
             sub_comments: None,
             status: data["status"].as_i64().unwrap_or(0) as i32,
+            ip_label: data["ip_label"].as_str().unwrap_or_default().to_string(),
+            sticker_url,
         })
     }
 

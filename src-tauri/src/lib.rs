@@ -2832,7 +2832,7 @@ async fn get_comments(
         }
     };
 
-    let (comments, next_cursor, has_more) =
+    let (comments, next_cursor, has_more, total) =
         match client.get_comments(&aweme_id, cursor, count).await {
             Ok(result) => result,
             Err(e) => {
@@ -2850,7 +2850,49 @@ async fn get_comments(
         "success": true,
         "comments": comments,
         "cursor": next_cursor,
-        "has_more": has_more
+        "has_more": has_more,
+        "total": total
+    }))
+}
+
+/// 获取评论的二级回复列表
+#[tauri::command]
+async fn get_comment_replies(
+    state: State<'_, AppState>,
+    aweme_id: String,
+    comment_id: String,
+    cursor: i64,
+    count: u32,
+) -> Result<serde_json::Value, String> {
+    let client = match get_client(&state).await {
+        Ok(client) => client,
+        Err(_) => {
+            return Ok(cookie_required_response());
+        }
+    };
+
+    let (comments, next_cursor, has_more, total) = match client
+        .get_comment_replies(&aweme_id, &comment_id, cursor, count)
+        .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            return Ok(api_login_or_verify_error_response(
+                &client,
+                "获取评论回复失败",
+                e,
+                &format!("https://www.douyin.com/video/{}", aweme_id),
+            )
+            .await)
+        }
+    };
+
+    Ok(serde_json::json!({
+        "success": true,
+        "comments": comments,
+        "cursor": next_cursor,
+        "has_more": has_more,
+        "total": total
     }))
 }
 
@@ -4422,6 +4464,7 @@ pub fn run() {
             save_friend_chat_state,
             get_recommended,
             get_comments,
+            get_comment_replies,
             verify_cookie,
             get_current_user,
             open_verify_browser,

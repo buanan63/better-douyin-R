@@ -152,6 +152,8 @@ pub struct CommentInfo {
     pub reply_comment_total: i64,
     pub sub_comments: Option<Vec<CommentInfo>>,
     pub status: i32,
+    pub ip_label: String,
+    pub sticker_url: String,
 }
 
 /// 评论用户
