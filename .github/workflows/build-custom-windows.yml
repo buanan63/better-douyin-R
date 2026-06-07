@@ -11,7 +11,7 @@ env:
 
 jobs:
   build-windows-portable:
-    name: Build Windows portable with publish-date filenames
+    name: Build Windows portable
     runs-on: windows-latest
 
     steps:
@@ -34,117 +34,6 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-
-      - name: Patch filename date rule
-        shell: pwsh
-        run: |
-          $path = "src-tauri/src/downloader/downloader.rs"
-          $text = (Get-Content -Raw -Encoding UTF8 $path).Replace("`r`n", "`n")
-
-          $text = $text.Replace('use chrono::Local;', 'use chrono::{Local, TimeZone};')
-          $text = $text.Replace("video.desc.clone(),`n            video.author.nickname.clone(),", "video.desc.clone(),`n            Some(video.create_time),`n            video.author.nickname.clone(),")
-          $text = $text.Replace("title: String,`n        author: String,", "title: String,`n        publish_time: Option<i64>,`n        author: String,")
-          $text = $text.Replace("media_type_name(&media_type),`n        );`n        let filename = generate_filename_with_config(", "media_type_name(&media_type),`n            publish_time,`n        );`n        let filename = generate_filename_with_config(")
-          $text = $text.Replace("media_type_name(&media_type),`n        );`n`n        let task = DownloadTask", "media_type_name(&media_type),`n            publish_time,`n        );`n`n        let task = DownloadTask")
-          $text = $text.Replace("media_type_name(&video.media_type),`n        );", "media_type_name(&video.media_type),`n            Some(video.create_time),`n        );")
-          $text = $text.Replace("media_type_name(&video.media_type),`n            );", "media_type_name(&video.media_type),`n                Some(video.create_time),`n            );")
-
-          $oldTemplateValue = @'
-          fn template_value(
-              token: &str,
-              title: &str,
-              aweme_id: &str,
-              author: &str,
-              media_type: &str,
-          ) -> String {
-              match token {
-                  "title" => title.to_string(),
-                  "aweme_id" => aweme_id.to_string(),
-                  "author" => author.to_string(),
-                  "date" => Local::now().format("%Y%m%d").to_string(),
-                  "time" => Local::now().format("%H%M%S").to_string(),
-                  "media_type" => media_type.to_string(),
-                  _ => String::new(),
-              }
-          }
-          '@.Trim().Replace("`r`n", "`n")
-
-          $newTemplateValue = @'
-          fn template_value(
-              token: &str,
-              title: &str,
-              aweme_id: &str,
-              author: &str,
-              media_type: &str,
-              publish_time: Option<i64>,
-          ) -> String {
-              let template_time = template_datetime(publish_time);
-              match token {
-                  "title" => title.to_string(),
-                  "aweme_id" => aweme_id.to_string(),
-                  "author" => author.to_string(),
-                  "date" => template_time.format("%Y%m%d").to_string(),
-                  "time" => template_time.format("%H%M%S").to_string(),
-                  "media_type" => media_type.to_string(),
-                  _ => String::new(),
-              }
-          }
-
-          fn template_datetime(publish_time: Option<i64>) -> chrono::DateTime<Local> {
-              publish_time
-                  .filter(|timestamp| *timestamp > 0)
-                  .and_then(|timestamp| Local.timestamp_opt(timestamp, 0).single())
-                  .unwrap_or_else(Local::now)
-          }
-          '@.Trim().Replace("`r`n", "`n")
-
-          $text = $text.Replace($oldTemplateValue, $newTemplateValue)
-          $text = $text.Replace("media_type: &str,`n) -> String {`n    let mut output", "media_type: &str,`n    publish_time: Option<i64>,`n) -> String {`n    let mut output")
-          $text = $text.Replace("output.push_str(&template_value(&token, title, aweme_id, author, media_type));", "output.push_str(&template_value(&token, title, aweme_id, author, media_type, publish_time));")
-          $text = $text.Replace("media_type: &str,`n) -> String {`n    let normalized_title", "media_type: &str,`n    publish_time: Option<i64>,`n) -> String {`n    let normalized_title")
-          $text = $text.Replace("author.trim(),`n        media_type,`n    );", "author.trim(),`n        media_type,`n        publish_time,`n    );")
-          $text = $text.Replace("media_type: &str,`n) -> PathBuf {", "media_type: &str,`n    publish_time: Option<i64>,`n) -> PathBuf {")
-          $text = $text.Replace('let rendered = render_template(template, "", "", author.trim(), media_type);', 'let rendered = render_template(template, "", "", author.trim(), media_type, publish_time);')
-
-          Set-Content -Encoding UTF8 $path $text
-
-          $libPath = "src-tauri/src/lib.rs"
-          $libText = (Get-Content -Raw -Encoding UTF8 $libPath).Replace("`r`n", "`n")
-          $libText = $libText.Replace("aweme_id.clone(),`n                    desc.clone(),`n                    author_name.clone(),", "aweme_id.clone(),`n                    desc.clone(),`n                    None,`n                    author_name.clone(),")
-          $libText = $libText.Replace("aweme_id.clone(),`n                desc.clone(),`n                author_name.clone(),", "aweme_id.clone(),`n                desc.clone(),`n                None,`n                author_name.clone(),")
-          $oldManualDownloadCall = @'
-    downloader
-        .add_media_task(
-            aweme_id,
-            desc,
-            author_name,
-            String::new(),
-            cover,
-            media_type,
-            media_urls,
-            path,
-        )
-'@.Trim().Replace("`r`n", "`n")
-
-          $newManualDownloadCall = @'
-    downloader
-        .add_media_task(
-            aweme_id,
-            desc,
-            video
-                .get("create_time")
-                .and_then(|value| value.as_i64()),
-            author_name,
-            String::new(),
-            cover,
-            media_type,
-            media_urls,
-            path,
-        )
-'@.Trim().Replace("`r`n", "`n")
-
-          $libText = $libText.Replace($oldManualDownloadCall, $newManualDownloadCall)
-          Set-Content -Encoding UTF8 $libPath $libText
 
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
