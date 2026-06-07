@@ -108,6 +108,13 @@ jobs:
 
           Set-Content -Encoding UTF8 $path $text
 
+          $libPath = "src-tauri/src/lib.rs"
+          $libText = (Get-Content -Raw -Encoding UTF8 $libPath).Replace("`r`n", "`n")
+          $libText = $libText.Replace("aweme_id.clone(),`n                    desc.clone(),`n                    author_name.clone(),", "aweme_id.clone(),`n                    desc.clone(),`n                    None,`n                    author_name.clone(),")
+          $libText = $libText.Replace("aweme_id.clone(),`n                desc.clone(),`n                author_name.clone(),", "aweme_id.clone(),`n                desc.clone(),`n                None,`n                author_name.clone(),")
+          $libText = $libText.Replace("aweme_id,`n            desc,`n            author_name,", "aweme_id,`n            desc,`n            video`n                .get(`"create_time`")`n                .and_then(|value| value.as_i64()),`n            author_name,")
+          Set-Content -Encoding UTF8 $libPath $libText
+
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
 
