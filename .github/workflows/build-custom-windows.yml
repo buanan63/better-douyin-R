@@ -36,94 +36,81 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Patch source for publish-date filenames
-        shell: pwsh
+        shell: python
         run: |
-          function Replace-Or-Fail($text, $old, $new, $label) {
-            if (-not $text.Contains($old)) {
-              throw "Patch target not found: $label"
-            }
-            return $text.Replace($old, $new)
-          }
+          from pathlib import Path
 
-          $downloaderPath = "src-tauri/src/downloader/downloader.rs"
-          $text = (Get-Content -Raw -Encoding UTF8 $downloaderPath).Replace("`r`n", "`n")
+          def replace_or_fail(text, old, new, label):
+              if old not in text:
+                  raise RuntimeError(f"Patch target not found: {label}")
+              return text.replace(old, new)
 
-          $text = Replace-Or-Fail $text 'use chrono::Local;' 'use chrono::{Local, TimeZone};' 'chrono import'
+          downloader_path = Path("src-tauri/src/downloader/downloader.rs")
+          text = downloader_path.read_text(encoding="utf-8").replace("\r\n", "\n")
 
-          $text = Replace-Or-Fail $text @'
-            video.aweme_id.clone(),
+          text = replace_or_fail(text, "use chrono::Local;", "use chrono::{Local, TimeZone};", "chrono import")
+
+          text = replace_or_fail(text, '''            video.aweme_id.clone(),
             video.desc.clone(),
             video.author.nickname.clone(),
-'@ @'
-            video.aweme_id.clone(),
+''', '''            video.aweme_id.clone(),
             video.desc.clone(),
             Some(video.create_time),
             video.author.nickname.clone(),
-'@ 'add_task publish_time'
+''', "add_task publish_time")
 
-          $text = Replace-Or-Fail $text @'
-        aweme_id: String,
+          text = replace_or_fail(text, '''        aweme_id: String,
         title: String,
         author: String,
-'@ @'
-        aweme_id: String,
+''', '''        aweme_id: String,
         title: String,
         publish_time: Option<i64>,
         author: String,
-'@ 'add_media_task signature'
+''', "add_media_task signature")
 
-          $text = Replace-Or-Fail $text @'
-            &author,
+          text = replace_or_fail(text, '''            &author,
             media_type_name(&media_type),
         );
         let filename = generate_filename_with_config(
-'@ @'
-            &author,
+''', '''            &author,
             media_type_name(&media_type),
             publish_time,
         );
         let filename = generate_filename_with_config(
-'@ 'task output dir publish_time'
+''', "task output dir publish_time")
 
-          $text = Replace-Or-Fail $text @'
-            &author,
+          text = replace_or_fail(text, '''            &author,
             media_type_name(&media_type),
         );
 
         let task = DownloadTask {
-'@ @'
-            &author,
+''', '''            &author,
             media_type_name(&media_type),
             publish_time,
         );
 
         let task = DownloadTask {
-'@ 'task filename publish_time'
+''', "task filename publish_time")
 
-          $text = $text.Replace(@'
-            &video.author.nickname,
+          text = text.replace('''            &video.author.nickname,
             media_type_name(&video.media_type),
         );
-'@, @'
-            &video.author.nickname,
+''', '''            &video.author.nickname,
             media_type_name(&video.media_type),
             Some(video.create_time),
         );
-'@)
+''')
 
-          $text = $text.Replace(@'
-                &video.author.nickname,
+          text = text.replace('''                &video.author.nickname,
                 media_type_name(&video.media_type),
             );
-'@, @'
-                &video.author.nickname,
+''', '''                &video.author.nickname,
                 media_type_name(&video.media_type),
                 Some(video.create_time),
             );
-'@)
+''')
 
-          $text = Replace-Or-Fail $text @'
-fn template_value(
+          text = replace_or_fail(text, '''fn template_value(
     token: &str,
     title: &str,
     aweme_id: &str,
@@ -140,8 +127,7 @@ fn template_value(
         _ => String::new(),
     }
 }
-'@ @'
-fn template_value(
+''', '''fn template_value(
     token: &str,
     title: &str,
     aweme_id: &str,
@@ -167,83 +153,70 @@ fn template_datetime(publish_time: Option<i64>) -> chrono::DateTime<Local> {
         .and_then(|timestamp| Local.timestamp_opt(timestamp, 0).single())
         .unwrap_or_else(Local::now)
 }
-'@ 'template date logic'
+''', "template date logic")
 
-          $text = Replace-Or-Fail $text @'
-    media_type: &str,
+          text = replace_or_fail(text, '''    media_type: &str,
 ) -> String {
     let mut output = String::new();
-'@ @'
-    media_type: &str,
+''', '''    media_type: &str,
     publish_time: Option<i64>,
 ) -> String {
     let mut output = String::new();
-'@ 'render_template signature'
+''', "render_template signature")
 
-          $text = Replace-Or-Fail $text 'output.push_str(&template_value(&token, title, aweme_id, author, media_type));' 'output.push_str(&template_value(&token, title, aweme_id, author, media_type, publish_time));' 'template_value call'
+          text = replace_or_fail(text, "output.push_str(&template_value(&token, title, aweme_id, author, media_type));", "output.push_str(&template_value(&token, title, aweme_id, author, media_type, publish_time));", "template_value call")
 
-          $text = Replace-Or-Fail $text @'
-    media_type: &str,
+          text = replace_or_fail(text, '''    media_type: &str,
 ) -> String {
     let normalized_title = desc.split_whitespace().collect::<Vec<_>>().join(" ");
-'@ @'
-    media_type: &str,
+''', '''    media_type: &str,
     publish_time: Option<i64>,
 ) -> String {
     let normalized_title = desc.split_whitespace().collect::<Vec<_>>().join(" ");
-'@ 'filename signature'
+''', "filename signature")
 
-          $text = Replace-Or-Fail $text @'
-        author.trim(),
+          text = replace_or_fail(text, '''        author.trim(),
         media_type,
     );
-'@ @'
-        author.trim(),
+''', '''        author.trim(),
         media_type,
         publish_time,
     );
-'@ 'filename render call'
+''', "filename render call")
 
-          $text = Replace-Or-Fail $text @'
-    media_type: &str,
+          text = replace_or_fail(text, '''    media_type: &str,
 ) -> PathBuf {
-'@ @'
-    media_type: &str,
+''', '''    media_type: &str,
     publish_time: Option<i64>,
 ) -> PathBuf {
-'@ 'output dir signature'
+''', "output dir signature")
 
-          $text = Replace-Or-Fail $text 'let rendered = render_template(template, "", "", author.trim(), media_type);' 'let rendered = render_template(template, "", "", author.trim(), media_type, publish_time);' 'folder render call'
+          text = replace_or_fail(text, 'let rendered = render_template(template, "", "", author.trim(), media_type);', 'let rendered = render_template(template, "", "", author.trim(), media_type, publish_time);', "folder render call")
 
-          Set-Content -Encoding UTF8 $downloaderPath $text
+          downloader_path.write_text(text, encoding="utf-8")
 
-          $libPath = "src-tauri/src/lib.rs"
-          $libText = (Get-Content -Raw -Encoding UTF8 $libPath).Replace("`r`n", "`n")
+          lib_path = Path("src-tauri/src/lib.rs")
+          lib_text = lib_path.read_text(encoding="utf-8").replace("\r\n", "\n")
 
-          $libText = Replace-Or-Fail $libText @'
-                    aweme_id.clone(),
+          lib_text = replace_or_fail(lib_text, '''                    aweme_id.clone(),
                     desc.clone(),
                     author_name.clone(),
-'@ @'
-                    aweme_id.clone(),
+''', '''                    aweme_id.clone(),
                     desc.clone(),
                     None,
                     author_name.clone(),
-'@ 'download_video fallback fresh'
+''', "download_video fallback fresh")
 
-          $libText = Replace-Or-Fail $libText @'
-                aweme_id.clone(),
+          lib_text = replace_or_fail(lib_text, '''                aweme_id.clone(),
                 desc.clone(),
                 author_name.clone(),
-'@ @'
-                aweme_id.clone(),
+''', '''                aweme_id.clone(),
                 desc.clone(),
                 None,
                 author_name.clone(),
-'@ 'download_video fallback direct'
+''', "download_video fallback direct")
 
-          $libText = Replace-Or-Fail $libText @'
-    downloader
+          lib_text = replace_or_fail(lib_text, '''    downloader
         .add_media_task(
             aweme_id,
             desc,
@@ -254,8 +227,7 @@ fn template_datetime(publish_time: Option<i64>) -> chrono::DateTime<Local> {
             media_urls,
             path,
         )
-'@ @'
-    downloader
+''', '''    downloader
         .add_media_task(
             aweme_id,
             desc,
@@ -269,9 +241,9 @@ fn template_datetime(publish_time: Option<i64>) -> chrono::DateTime<Local> {
             media_urls,
             path,
         )
-'@ 'add_download_task fallback'
+''', "add_download_task fallback")
 
-          Set-Content -Encoding UTF8 $libPath $libText
+          lib_path.write_text(lib_text, encoding="utf-8")
 
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
