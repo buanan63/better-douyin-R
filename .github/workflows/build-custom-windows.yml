@@ -11,7 +11,7 @@ env:
 
 jobs:
   build-windows-portable:
-    name: Build Windows portable
+    name: Build Windows portable with publish-date filenames
     runs-on: windows-latest
 
     steps:
@@ -34,6 +34,244 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+
+      - name: Patch source for publish-date filenames
+        shell: pwsh
+        run: |
+          function Replace-Or-Fail($text, $old, $new, $label) {
+            if (-not $text.Contains($old)) {
+              throw "Patch target not found: $label"
+            }
+            return $text.Replace($old, $new)
+          }
+
+          $downloaderPath = "src-tauri/src/downloader/downloader.rs"
+          $text = (Get-Content -Raw -Encoding UTF8 $downloaderPath).Replace("`r`n", "`n")
+
+          $text = Replace-Or-Fail $text 'use chrono::Local;' 'use chrono::{Local, TimeZone};' 'chrono import'
+
+          $text = Replace-Or-Fail $text @'
+            video.aweme_id.clone(),
+            video.desc.clone(),
+            video.author.nickname.clone(),
+'@ @'
+            video.aweme_id.clone(),
+            video.desc.clone(),
+            Some(video.create_time),
+            video.author.nickname.clone(),
+'@ 'add_task publish_time'
+
+          $text = Replace-Or-Fail $text @'
+        aweme_id: String,
+        title: String,
+        author: String,
+'@ @'
+        aweme_id: String,
+        title: String,
+        publish_time: Option<i64>,
+        author: String,
+'@ 'add_media_task signature'
+
+          $text = Replace-Or-Fail $text @'
+            &author,
+            media_type_name(&media_type),
+        );
+        let filename = generate_filename_with_config(
+'@ @'
+            &author,
+            media_type_name(&media_type),
+            publish_time,
+        );
+        let filename = generate_filename_with_config(
+'@ 'task output dir publish_time'
+
+          $text = Replace-Or-Fail $text @'
+            &author,
+            media_type_name(&media_type),
+        );
+
+        let task = DownloadTask {
+'@ @'
+            &author,
+            media_type_name(&media_type),
+            publish_time,
+        );
+
+        let task = DownloadTask {
+'@ 'task filename publish_time'
+
+          $text = $text.Replace(@'
+            &video.author.nickname,
+            media_type_name(&video.media_type),
+        );
+'@, @'
+            &video.author.nickname,
+            media_type_name(&video.media_type),
+            Some(video.create_time),
+        );
+'@)
+
+          $text = $text.Replace(@'
+                &video.author.nickname,
+                media_type_name(&video.media_type),
+            );
+'@, @'
+                &video.author.nickname,
+                media_type_name(&video.media_type),
+                Some(video.create_time),
+            );
+'@)
+
+          $text = Replace-Or-Fail $text @'
+fn template_value(
+    token: &str,
+    title: &str,
+    aweme_id: &str,
+    author: &str,
+    media_type: &str,
+) -> String {
+    match token {
+        "title" => title.to_string(),
+        "aweme_id" => aweme_id.to_string(),
+        "author" => author.to_string(),
+        "date" => Local::now().format("%Y%m%d").to_string(),
+        "time" => Local::now().format("%H%M%S").to_string(),
+        "media_type" => media_type.to_string(),
+        _ => String::new(),
+    }
+}
+'@ @'
+fn template_value(
+    token: &str,
+    title: &str,
+    aweme_id: &str,
+    author: &str,
+    media_type: &str,
+    publish_time: Option<i64>,
+) -> String {
+    let template_time = template_datetime(publish_time);
+    match token {
+        "title" => title.to_string(),
+        "aweme_id" => aweme_id.to_string(),
+        "author" => author.to_string(),
+        "date" => template_time.format("%Y%m%d").to_string(),
+        "time" => template_time.format("%H%M%S").to_string(),
+        "media_type" => media_type.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn template_datetime(publish_time: Option<i64>) -> chrono::DateTime<Local> {
+    publish_time
+        .filter(|timestamp| *timestamp > 0)
+        .and_then(|timestamp| Local.timestamp_opt(timestamp, 0).single())
+        .unwrap_or_else(Local::now)
+}
+'@ 'template date logic'
+
+          $text = Replace-Or-Fail $text @'
+    media_type: &str,
+) -> String {
+    let mut output = String::new();
+'@ @'
+    media_type: &str,
+    publish_time: Option<i64>,
+) -> String {
+    let mut output = String::new();
+'@ 'render_template signature'
+
+          $text = Replace-Or-Fail $text 'output.push_str(&template_value(&token, title, aweme_id, author, media_type));' 'output.push_str(&template_value(&token, title, aweme_id, author, media_type, publish_time));' 'template_value call'
+
+          $text = Replace-Or-Fail $text @'
+    media_type: &str,
+) -> String {
+    let normalized_title = desc.split_whitespace().collect::<Vec<_>>().join(" ");
+'@ @'
+    media_type: &str,
+    publish_time: Option<i64>,
+) -> String {
+    let normalized_title = desc.split_whitespace().collect::<Vec<_>>().join(" ");
+'@ 'filename signature'
+
+          $text = Replace-Or-Fail $text @'
+        author.trim(),
+        media_type,
+    );
+'@ @'
+        author.trim(),
+        media_type,
+        publish_time,
+    );
+'@ 'filename render call'
+
+          $text = Replace-Or-Fail $text @'
+    media_type: &str,
+) -> PathBuf {
+'@ @'
+    media_type: &str,
+    publish_time: Option<i64>,
+) -> PathBuf {
+'@ 'output dir signature'
+
+          $text = Replace-Or-Fail $text 'let rendered = render_template(template, "", "", author.trim(), media_type);' 'let rendered = render_template(template, "", "", author.trim(), media_type, publish_time);' 'folder render call'
+
+          Set-Content -Encoding UTF8 $downloaderPath $text
+
+          $libPath = "src-tauri/src/lib.rs"
+          $libText = (Get-Content -Raw -Encoding UTF8 $libPath).Replace("`r`n", "`n")
+
+          $libText = Replace-Or-Fail $libText @'
+                    aweme_id.clone(),
+                    desc.clone(),
+                    author_name.clone(),
+'@ @'
+                    aweme_id.clone(),
+                    desc.clone(),
+                    None,
+                    author_name.clone(),
+'@ 'download_video fallback fresh'
+
+          $libText = Replace-Or-Fail $libText @'
+                aweme_id.clone(),
+                desc.clone(),
+                author_name.clone(),
+'@ @'
+                aweme_id.clone(),
+                desc.clone(),
+                None,
+                author_name.clone(),
+'@ 'download_video fallback direct'
+
+          $libText = Replace-Or-Fail $libText @'
+    downloader
+        .add_media_task(
+            aweme_id,
+            desc,
+            author_name,
+            String::new(),
+            cover,
+            media_type,
+            media_urls,
+            path,
+        )
+'@ @'
+    downloader
+        .add_media_task(
+            aweme_id,
+            desc,
+            video
+                .get("create_time")
+                .and_then(|value| value.as_i64()),
+            author_name,
+            String::new(),
+            cover,
+            media_type,
+            media_urls,
+            path,
+        )
+'@ 'add_download_task fallback'
+
+          Set-Content -Encoding UTF8 $libPath $libText
 
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
@@ -65,20 +303,12 @@ jobs:
 
           if (-not $exePath) {
             Write-Error "Could not find built portable exe"
-            Get-ChildItem -Path "src-tauri\target" -Recurse -Filter "*.exe" | ForEach-Object { Write-Output $_.FullName }
             exit 1
           }
 
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item $exePath "dist\better-douyin-R-publish-date.exe"
-          @"
-          better-douyin-R custom portable build
-          ====================================
-
-          This build changes {date} and {time} in download naming templates to use the video's publish time when available.
-          Run better-douyin-R-publish-date.exe to start.
-          "@ | Set-Content -Path "dist\README.txt" -Encoding UTF8
-          Compress-Archive -Path "dist\better-douyin-R-publish-date.exe", "dist\README.txt" -DestinationPath "better-douyin-R-publish-date-windows-x64.zip" -Force
+          Compress-Archive -Path "dist\better-douyin-R-publish-date.exe" -DestinationPath "better-douyin-R-publish-date-windows-x64.zip" -Force
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
