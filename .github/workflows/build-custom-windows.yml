@@ -1,0 +1,161 @@
+name: Build custom Windows portable
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-windows-portable:
+    name: Build Windows portable with publish-date filenames
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Patch filename date rule
+        shell: pwsh
+        run: |
+          $path = "src-tauri/src/downloader/downloader.rs"
+          $text = (Get-Content -Raw -Encoding UTF8 $path).Replace("`r`n", "`n")
+
+          $text = $text.Replace('use chrono::Local;', 'use chrono::{Local, TimeZone};')
+          $text = $text.Replace("video.desc.clone(),`n            video.author.nickname.clone(),", "video.desc.clone(),`n            Some(video.create_time),`n            video.author.nickname.clone(),")
+          $text = $text.Replace("title: String,`n        author: String,", "title: String,`n        publish_time: Option<i64>,`n        author: String,")
+          $text = $text.Replace("media_type_name(&media_type),`n        );`n        let filename = generate_filename_with_config(", "media_type_name(&media_type),`n            publish_time,`n        );`n        let filename = generate_filename_with_config(")
+          $text = $text.Replace("media_type_name(&media_type),`n        );`n`n        let task = DownloadTask", "media_type_name(&media_type),`n            publish_time,`n        );`n`n        let task = DownloadTask")
+          $text = $text.Replace("media_type_name(&video.media_type),`n        );", "media_type_name(&video.media_type),`n            Some(video.create_time),`n        );")
+          $text = $text.Replace("media_type_name(&video.media_type),`n            );", "media_type_name(&video.media_type),`n                Some(video.create_time),`n            );")
+
+          $oldTemplateValue = @'
+          fn template_value(
+              token: &str,
+              title: &str,
+              aweme_id: &str,
+              author: &str,
+              media_type: &str,
+          ) -> String {
+              match token {
+                  "title" => title.to_string(),
+                  "aweme_id" => aweme_id.to_string(),
+                  "author" => author.to_string(),
+                  "date" => Local::now().format("%Y%m%d").to_string(),
+                  "time" => Local::now().format("%H%M%S").to_string(),
+                  "media_type" => media_type.to_string(),
+                  _ => String::new(),
+              }
+          }
+          '@.Trim().Replace("`r`n", "`n")
+
+          $newTemplateValue = @'
+          fn template_value(
+              token: &str,
+              title: &str,
+              aweme_id: &str,
+              author: &str,
+              media_type: &str,
+              publish_time: Option<i64>,
+          ) -> String {
+              let template_time = template_datetime(publish_time);
+              match token {
+                  "title" => title.to_string(),
+                  "aweme_id" => aweme_id.to_string(),
+                  "author" => author.to_string(),
+                  "date" => template_time.format("%Y%m%d").to_string(),
+                  "time" => template_time.format("%H%M%S").to_string(),
+                  "media_type" => media_type.to_string(),
+                  _ => String::new(),
+              }
+          }
+
+          fn template_datetime(publish_time: Option<i64>) -> chrono::DateTime<Local> {
+              publish_time
+                  .filter(|timestamp| *timestamp > 0)
+                  .and_then(|timestamp| Local.timestamp_opt(timestamp, 0).single())
+                  .unwrap_or_else(Local::now)
+          }
+          '@.Trim().Replace("`r`n", "`n")
+
+          $text = $text.Replace($oldTemplateValue, $newTemplateValue)
+          $text = $text.Replace("media_type: &str,`n) -> String {`n    let mut output", "media_type: &str,`n    publish_time: Option<i64>,`n) -> String {`n    let mut output")
+          $text = $text.Replace("output.push_str(&template_value(&token, title, aweme_id, author, media_type));", "output.push_str(&template_value(&token, title, aweme_id, author, media_type, publish_time));")
+          $text = $text.Replace("media_type: &str,`n) -> String {`n    let normalized_title", "media_type: &str,`n    publish_time: Option<i64>,`n) -> String {`n    let normalized_title")
+          $text = $text.Replace("author.trim(),`n        media_type,`n    );", "author.trim(),`n        media_type,`n        publish_time,`n    );")
+          $text = $text.Replace("media_type: &str,`n) -> PathBuf {", "media_type: &str,`n    publish_time: Option<i64>,`n) -> PathBuf {")
+          $text = $text.Replace('let rendered = render_template(template, "", "", author.trim(), media_type);', 'let rendered = render_template(template, "", "", author.trim(), media_type, publish_time);')
+
+          Set-Content -Encoding UTF8 $path $text
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+
+      - name: Verify Tauri CLI
+        run: npm --prefix frontend run tauri -- --version
+
+      - name: Build portable exe
+        run: node scripts/run-tauri.mjs build --target x86_64-pc-windows-msvc --no-bundle
+
+      - name: Package portable exe
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "src-tauri\target\x86_64-pc-windows-msvc\release",
+            "src-tauri\target\release"
+          ) | Where-Object { Test-Path $_ }
+
+          $exePath = $null
+          foreach ($dir in $candidates) {
+            $match = Get-ChildItem -Path $dir -Filter "*.exe" -File |
+              Where-Object { $_.Name -notmatch "setup|installer|uninstall" } |
+              Select-Object -First 1
+            if ($match) {
+              $exePath = $match.FullName
+              break
+            }
+          }
+
+          if (-not $exePath) {
+            Write-Error "Could not find built portable exe"
+            Get-ChildItem -Path "src-tauri\target" -Recurse -Filter "*.exe" | ForEach-Object { Write-Output $_.FullName }
+            exit 1
+          }
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item $exePath "dist\better-douyin-R-publish-date.exe"
+          @"
+          better-douyin-R custom portable build
+          ====================================
+
+          This build changes {date} and {time} in download naming templates to use the video's publish time when available.
+          Run better-douyin-R-publish-date.exe to start.
+          "@ | Set-Content -Path "dist\README.txt" -Encoding UTF8
+          Compress-Archive -Path "dist\better-douyin-R-publish-date.exe", "dist\README.txt" -DestinationPath "better-douyin-R-publish-date-windows-x64.zip" -Force
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: better-douyin-R-publish-date-windows-x64
+          path: better-douyin-R-publish-date-windows-x64.zip
+          if-no-files-found: error
